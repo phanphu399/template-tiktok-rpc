@@ -1,6 +1,6 @@
 # 🪷 Chùa Linh Ứng Online — TikTok Live RPC (9:16 Interactive Buddhist Sanctuary)
 
-Hệ thống phát trực tiếp tương tác (**Interactive TikTok Live Stream & JSON-RPC 2.0**) chuẩn khung dọc **9:16 (`1080×1920`)** dành cho **OBS Studio / TikTok Live Studio**, chạy siêu nhẹ trên **Bun.js** và tích hợp giọng đọc AI tiếng Việt **ZeroTTS (`zeroweight-ai/ZeroTTS`)**.
+Hệ thống phát trực tiếp tương tác (**Interactive TikTok Live Stream & JSON-RPC 2.0**) chuẩn khung dọc **9:16 (`1080×1920`)** dành cho **OBS Studio / TikTok Live Studio**, chạy siêu nhẹ trên **Bun.js** và tích hợp giọng đọc AI tiếng Việt **ZeroTTS (`zeroweight-ai/ZeroTTS`)**. Giọng mặc định là **nam trầm ấm (Gia Huy)**; có thể đổi sang Hữu Đức, Quang Minh, Tiến Đạt ngay trong giao diện.
 
 Người xem trên TikTok Live tương tác trực tiếp qua **Bình luận (Comment)**, **Thả tim (Like)**, **Chia sẻ / Follow** và **Tặng quà (Gift)** để thực hiện các nghi thức tâm linh trên màn hình Chánh Điện **Đức Phật A Di Đà**:
 - 🔥 **Thắp hương & Đảnh lễ Tam Bái (8-Frame Walking & Prostration)**: Nhân vật Phật tử mặc áo lam bước đi từng bước dọc thảm đỏ hoa sen lên trước Lư Hương Đỉnh Đồng, hạ gối quỳ và thực hiện 3 lạy Ngũ thể đầu địa hướng về Đức Phật A Di Đà.
@@ -57,6 +57,9 @@ bun install
 # Tạo môi trường Python .venv và cài đặt ZeroTTS
 uv venv .venv
 uv pip install --python .venv/bin/python zerotts pillow
+
+# Windows (PowerShell / CMD):
+uv pip install --python .venv/Scripts/python.exe zerotts pillow
 ```
 
 ### 3. Khởi chạy Server
@@ -70,6 +73,26 @@ Mặc định server chạy tại cổng `3000`:
 - **Màn hình Live + Điều khiển nhanh**: [http://localhost:3000](http://localhost:3000)
 - **Màn hình OBS Browser Source (Sạch 9:16)**: [http://localhost:3000/?obs=1](http://localhost:3000/?obs=1) *(Đặt kích thước Browser Source trong OBS là `1080 × 1920`)*
 - **Bảng điều khiển Admin & RPC**: [http://localhost:3000/admin](http://localhost:3000/admin)
+
+### 4. Biến môi trường tuỳ chọn
+| Biến | Mặc định | Ý nghĩa |
+| :--- | :--- | :--- |
+| `PORT` | `3000` | Cổng HTTP/WebSocket |
+| `HOST` | `0.0.0.0` | Địa chỉ lắng nghe (đặt `127.0.0.1` nếu chỉ chạy nội bộ) |
+| `TIKTOK_USER` | `zenfacts_vn` | Kênh TikTok Live tự kết nối khi khởi động |
+| `ZEROTTS_VOICE` | `giahuy` | Giọng đọc mặc định (`giahuy`, `huuduc`, `quangminh`, `tiendat`) |
+| `ZEROTTS_CACHE_FILES` | `400` | Số file WAV tối đa giữ trong `data/tts-cache` |
+| `RPC_TOKEN` | *(trống)* | Bật xác thực `/rpc`, `/api/tts` và WebSocket bằng token |
+
+Ví dụ (PowerShell):
+```powershell
+$env:RPC_TOKEN="mat-khau-bi-mat"; $env:ZEROTTS_VOICE="huuduc"; bun start
+```
+
+Khi đặt `RPC_TOKEN`, mọi lệnh gọi phải gửi kèm một trong các dạng:
+- Header `x-rpc-token: <token>`
+- Header `Authorization: Bearer <token>`
+- Query `?token=<token>` (dùng cho WebSocket và mở trang `/admin?token=...`)
 
 ---
 
@@ -142,7 +165,8 @@ curl -X POST http://localhost:3000/rpc \
 - `temple.ringBell`: Thỉnh Đại Hồng Chung (`user`, `count`, `wish`).
 - `temple.offerGift`: Dâng lễ vật (`user`, `giftType`: `lotus` | `fruit` | `lamp` | `dragon`, `coins`, `giftName`).
 - `temple.grandCeremony`: Kích hoạt Đại Lễ Kim Long Chầu Phật (`user`, `coins`, `giftName`).
-- `temple.updateSettings`: Cập nhật âm lượng nhạc nền (`musicVolume`), giọng đọc (`ttsVolume`), bật/tắt TTS.
+- `temple.speak`: Tổng hợp & phát giọng đọc (`text`, `voice`, `broadcast`).
+- `temple.updateSettings`: Cập nhật âm lượng nhạc nền (`musicVolume`), âm lượng giọng đọc (`ttsVolume`), giọng đọc (`ttsVoice`), bật/tắt TTS và các hiệu ứng.
 - `temple.resetMerit`: Đặt lại bảng thống kê Công Đức.
 - `live.connect` / `live.disconnect`: Kết nối / Ngắt kết nối phòng TikTok Live.
 
@@ -164,8 +188,10 @@ curl -X POST http://localhost:3000/rpc \
 │   │   ├── live.js            # Điều phối 8-frame prostration, Đạo Tràng 40 chỗ ngồi & WebSocket RPC
 │   │   ├── particles.js       # 30 FPS Offscreen-Sprite Particle Engine (Khói hương, Hoa sen, Sóng âm)
 │   │   └── audio.js           # Quản lý nhạc nền auto-ducking, Pháp khí Web Audio & hàng đợi đồng bộ TTS
-│   └── assets/                # Hình nền Đức Phật A Di Đà, 8 frame Phật tử áo lam & nhạc nền
+│   └── assets/                # Hình nền Đức Phật A Di Đà, 8 frame Phật tử áo lam (nhạc nền `bg_chant.m4a` là tuỳ chọn — thiếu sẽ tự dùng nhạc thiền tổng hợp)
 └── docs/
     ├── demo/                  # Hình ảnh chụp màn hình demo thực tế
     └── superpowers/specs/     # Tài liệu thiết kế kỹ thuật (Design Spec)
 ```
+
+# template-tiktok-rpc

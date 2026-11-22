@@ -8,14 +8,27 @@ const { WebSocketServer } = require('ws');
 const { TikTokLiveConnection, WebcastEvent, ControlEvent } = require('tiktok-live-connector');
 
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = path.join(__dirname, 'data');
 const TTS_CACHE_DIR = path.join(DATA_DIR, 'tts-cache');
 const STATE_FILE = path.join(DATA_DIR, 'merit-state.json');
 
+// Giọng nam trầm ấm mặc định (ZeroTTS: giahuy). Đổi bằng biến môi trường
+// ZEROTTS_VOICE hoặc ngay trong giao diện Admin / bảng điều khiển nhanh.
+const DEFAULT_TTS_VOICE = (process.env.ZEROTTS_VOICE || 'giahuy').toLowerCase();
+// Danh sách giọng "nam" ưu tiên hiển thị trong bộ chọn (model có nhiều giọng khác).
+const MALE_VOICE_ORDER = ['giahuy', 'huuduc', 'quangminh', 'tiendat'];
+
+// Xác thực RPC tuỳ chọn: nếu đặt RPC_TOKEN thì mọi lệnh thay đổi trạng thái
+// phải gửi kèm header "x-rpc-token" hoặc "Authorization: Bearer <token>".
+// Không đặt biến này = giữ nguyên hành vi cũ (chỉ nên dùng trong LAN).
+const RPC_TOKEN = process.env.RPC_TOKEN || '';
+const EULER_SIGN_API_KEY = process.env.SIGN_API_KEY || process.env.EULER_API_KEY || '';
+
 fs.mkdirSync(TTS_CACHE_DIR, { recursive: true });
 
 // ============================================================================
-// 1. BỘ 18 QUẺ LINH XĂM CHÙA LINH ỨNG (FORTUNE STICKS DECK)
+// 1. BỘ 10 QUẺ LINH XĂM CHÙA LINH ỨNG (FORTUNE STICKS DECK)
 // ============================================================================
 const FORTUNE_DECK = [
   {
@@ -101,41 +114,69 @@ const FORTUNE_DECK = [
 ];
 
 // ============================================================================
-// 2. ZEROTTS PYTHON WORKER MANAGER (VOICE: MAI CHI)
+// 2. ZEROTTS PYTHON WORKER MANAGER (VOICE: NAM TRẦM ẤM — GIA HUY)
 // ============================================================================
 class ZeroTTSManager {
   constructor() {
     this.proc = null;
     this.ready = false;
     this.status = 'starting';
-    this.voice = 'maichi';
-    this.voices = ['maichi'];
+    this.voice = DEFAULT_TTS_VOICE;
+    this.voices = [DEFAULT_TTS_VOICE];
+    this.voiceDetails = [];
     this.model = 'zeroweight-ai/ZeroTTS';
-    this.pending = new Map();
-    this.inflight = new Map();
+    this.queue = [];           // Hàng đợi tuần tự không để dồn ứ CPU
+    this.currentJob = null;     // Job duy nhất đang được Python xử lý
+    this.cache = new Map();     // In-memory cache lưu kết quả các câu thoại lặp lại (0ms latency)
+    this.inflight = new Map();  // Deduplicate các request giống hệt đang xử lý
     this.reqCounter = 0;
     this.buffer = '';
+    this.restartAttempts = 0;
+    this.restartTimer = null;
+    this.stopping = false;
     this.startWorker();
   }
 
   resolvePythonBin() {
-    const venvPy = path.join(__dirname, '.venv', 'bin', 'python');
-    if (fs.existsSync(venvPy)) return venvPy;
-    return 'python3';
+    const venvWin = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
+    if (fs.existsSync(venvWin)) return venvWin;
+    const venvUnix = path.join(__dirname, '.venv', 'bin', 'python');
+    if (fs.existsSync(venvUnix)) return venvUnix;
+    return process.platform === 'win32' ? 'python' : 'python3';
   }
 
   startWorker() {
+    if (this.stopping) return;
     const pyBin = this.resolvePythonBin();
     const scriptPath = path.join(__dirname, 'tts_worker.py');
-    console.log(`[ZeroTTS] Khởi chạy worker với ${pyBin} (Giọng mặc định: Mai Chi)...`);
+    console.log(`[ZeroTTS] Khởi chạy worker với ${pyBin} (Giọng mặc định: ${DEFAULT_TTS_VOICE})...`);
 
     this.status = 'loading';
-    this.proc = spawn(pyBin, [scriptPath], {
-      cwd: __dirname,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+    this.ready = false;
+    this.buffer = '';
 
-    this.proc.stdout.on('data', (chunk) => {
+    let proc;
+    try {
+      proc = spawn(pyBin, ['-X', 'utf8', '-u', scriptPath], {
+        cwd: __dirname,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+          ZEROTTS_VOICE: DEFAULT_TTS_VOICE
+        }
+      });
+    } catch (err) {
+      this.status = 'error';
+      console.error('[ZeroTTS] Không spawn được Python:', err.message);
+      this.scheduleRestart();
+      return;
+    }
+    this.proc = proc;
+
+    proc.stdout.on('data', (chunk) => {
       this.buffer += chunk.toString('utf8');
       let lines = this.buffer.split('\n');
       this.buffer = lines.pop() || '';
@@ -145,21 +186,65 @@ class ZeroTTSManager {
       }
     });
 
-    this.proc.stderr.on('data', (chunk) => {
+    proc.stderr.on('data', (chunk) => {
       const msg = chunk.toString('utf8').trim();
       if (msg) console.log(`[ZeroTTS stderr] ${msg}`);
     });
 
-    this.proc.on('exit', (code) => {
-      console.warn(`[ZeroTTS] Worker thoát với mã ${code}`);
+    proc.on('error', (err) => {
+      console.error('[ZeroTTS] Lỗi tiến trình:', err.message);
+      this.status = 'error';
+      broadcastNotification('tts.status', this.getStatus());
+    });
+
+    proc.on('exit', (code, signal) => {
+      console.warn(`[ZeroTTS] Worker thoát (code=${code}, signal=${signal || '-'})`);
       this.ready = false;
       this.status = 'stopped';
-      for (const [, item] of this.pending) {
-        clearTimeout(item.timer);
+      if (this.currentJob) {
+        if (this.currentJob.timer) clearTimeout(this.currentJob.timer);
+        this.currentJob.resolve({ ok: false, error: 'ZeroTTS worker exited' });
+        this.currentJob = null;
+      }
+      for (const item of this.queue) {
+        if (item.timer) clearTimeout(item.timer);
         item.resolve({ ok: false, error: 'ZeroTTS worker exited' });
       }
-      this.pending.clear();
+      this.queue = [];
+      this.inflight.clear();
+      broadcastNotification('tts.status', this.getStatus());
+      if (!this.stopping) this.scheduleRestart();
     });
+  }
+
+  // Tự khởi động lại worker khi Python chết (OOM, crash model, cập nhật code...)
+  scheduleRestart() {
+    if (this.stopping || this.restartTimer) return;
+    this.restartAttempts += 1;
+    const delay = Math.min(30000, 2000 * Math.pow(1.6, Math.min(this.restartAttempts, 6)));
+    console.warn(`[ZeroTTS] Sẽ thử khởi động lại sau ${Math.round(delay / 1000)}s (lần ${this.restartAttempts})`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      this.status = 'starting';
+      this.startWorker();
+    }, delay);
+  }
+
+  stop() {
+    this.stopping = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    if (this.proc) {
+      try {
+        this.proc.stdin.end();
+        this.proc.kill();
+      } catch (_) {}
+      this.proc = null;
+    }
+    this.ready = false;
+    this.status = 'stopped';
   }
 
   handleWorkerLine(line) {
@@ -172,17 +257,41 @@ class ZeroTTSManager {
       } else if (msg.type === 'ready') {
         this.ready = true;
         this.status = 'ready';
-        this.voice = msg.voice || 'maichi';
-        this.voices = msg.voices || ['maichi'];
+        this.restartAttempts = 0;
+        this.voices = Array.isArray(msg.voices) && msg.voices.length ? msg.voices : [DEFAULT_TTS_VOICE];
+        this.voiceDetails = Array.isArray(msg.voiceDetails) ? msg.voiceDetails : [];
+        // Ưu tiên giọng đang cấu hình, nếu model không có thì lấy giọng nam mặc định
+        const wanted = String(state?.settings?.ttsVoice || DEFAULT_TTS_VOICE).toLowerCase();
+        this.voice = this.voices.includes(wanted)
+          ? wanted
+          : (this.voices.includes(DEFAULT_TTS_VOICE) ? DEFAULT_TTS_VOICE : this.voices[0]);
         this.model = msg.model || this.model;
+        // Nếu giọng đã lưu không có trong model (hoặc model đổi giọng), đồng bộ lại
+        if (state?.settings && state.settings.ttsVoice !== this.voice) {
+          state.settings.ttsVoice = this.voice;
+          saveState();
+        }
         console.log(`[ZeroTTS] Sẵn sàng sau ${msg.loadSec}s! Giọng: ${this.voice} (${this.voices.join(', ')})`);
         broadcastNotification('tts.status', this.getStatus());
+        broadcastNotification('temple.state', getPublicState());
+        this.pumpQueue();
       } else if (msg.type === 'result' && msg.id != null) {
-        const entry = this.pending.get(msg.id);
-        if (entry) {
-          clearTimeout(entry.timer);
-          this.pending.delete(msg.id);
-          entry.resolve(msg);
+        if (this.currentJob && this.currentJob.id === msg.id) {
+          if (this.currentJob.timer) clearTimeout(this.currentJob.timer);
+          const job = this.currentJob;
+          this.currentJob = null;
+
+          if (msg.ok && msg.url) {
+            const cacheKey = `${job.voice}::${job.text}`;
+            if (this.cache.size >= 500) {
+              const oldestKey = this.cache.keys().next().value;
+              this.cache.delete(oldestKey);
+            }
+            this.cache.set(cacheKey, msg);
+          }
+
+          job.resolve(msg);
+          this.pumpQueue();
         }
       } else if (msg.type === 'error') {
         console.error('[ZeroTTS Error]', msg.error);
@@ -194,40 +303,128 @@ class ZeroTTSManager {
     }
   }
 
+  pumpQueue() {
+    if (this.currentJob || this.queue.length === 0) return;
+    if (!this.proc || !this.ready) return;
+
+    const job = this.queue.shift();
+    this.currentJob = job;
+
+    // Timeout an toàn tuyệt đối (30s): chỉ kích hoạt nếu Python thực sự bị deadlock/treo
+    job.timer = setTimeout(() => {
+      console.warn(`[ZeroTTS] Job #${job.id} bị treo quá 30s ("${job.text.slice(0, 30)}..."), khởi động lại worker để dọn sạch đường truyền!`);
+      const timedOutJob = this.currentJob;
+      this.currentJob = null;
+      if (timedOutJob) {
+        timedOutJob.resolve({ ok: false, error: 'ZeroTTS synthesis timeout' });
+      }
+      if (this.proc) {
+        try { this.proc.kill(); } catch (_) {}
+      }
+    }, 30000);
+
+    const payload = JSON.stringify({ id: job.id, text: job.text, voice: job.voice }) + '\n';
+    try {
+      this.proc.stdin.write(payload);
+    } catch (err) {
+      if (job.timer) clearTimeout(job.timer);
+      this.currentJob = null;
+      job.resolve({ ok: false, error: `Không gửi được dữ liệu tới ZeroTTS: ${err.message}` });
+      this.pumpQueue();
+    }
+  }
+
   getStatus() {
     return {
       ready: this.ready,
       status: this.status,
       engine: 'ZeroTTS (zeroweight-ai/ZeroTTS)',
-      voice: state.settings.ttsVoice || this.voice || 'maichi',
+      voice: state?.settings?.ttsVoice || this.voice || DEFAULT_TTS_VOICE,
       voices: this.voices,
-      model: this.model
+      voiceDetails: this.voiceDetails,
+      maleVoices: this.voices.filter((v) => MALE_VOICE_ORDER.includes(v)),
+      model: this.model,
+      queueDepth: this.queue.length,
+      isBusy: Boolean(this.currentJob)
     };
   }
 
-  synthesize(text, voiceOverride) {
+  synthesize(text, voiceOverride, priority = 1) {
     const cleanText = String(text || '').trim();
     if (!cleanText) return Promise.resolve({ ok: false, error: 'Empty text' });
-    const voice = (voiceOverride || state.settings.ttsVoice || 'maichi').toLowerCase();
+
+    let voice = String(voiceOverride || state?.settings?.ttsVoice || DEFAULT_TTS_VOICE).toLowerCase();
+    if (this.voices.length && !this.voices.includes(voice)) {
+      voice = this.voices.includes(this.voice) ? this.voice : this.voices[0];
+    }
     const dedupKey = `${voice}::${cleanText}`;
 
+    // 1. Nếu đã có trong in-memory cache, trả về tức thì (0ms latency)!
+    if (this.cache.has(dedupKey)) {
+      const cached = this.cache.get(dedupKey);
+      return Promise.resolve({ ...cached, cached: true });
+    }
+
+    // 2. Nếu đang có request giống hệt đang xử lý, dùng chung Promise
     if (this.inflight.has(dedupKey)) {
       return this.inflight.get(dedupKey);
     }
 
+    const prio = Number(priority) || 1;
     const promise = new Promise((resolve) => {
-      if (!this.proc || !this.ready) {
-        return resolve({ ok: false, error: `ZeroTTS đang ở trạng thái: ${this.status}` });
+      // 3. Quản lý hàng đợi: Tối đa 3 việc chờ để không làm trễ phiên live
+      if (this.queue.length >= 3) {
+        if (prio === 0) {
+          // Ưu tiên cao (Quà tặng, Thông báo trụ trì): Huỷ việc có độ ưu tiên thấp nhất
+          const dropIdx = this.queue.findLastIndex(j => j.priority > 0);
+          if (dropIdx !== -1) {
+            const [dropped] = this.queue.splice(dropIdx, 1);
+            if (dropped.timer) clearTimeout(dropped.timer);
+            dropped.resolve({ ok: false, error: 'Hàng đợi bận, nhường cho nghi thức quan trọng hơn', dropped: true });
+          }
+        } else {
+          // Độ ưu tiên bình thường hoặc thấp: Loại bỏ ngay lập tức để không gây trễ dồn
+          return resolve({ ok: false, error: 'Hàng đợi âm thanh đang bận', dropped: true });
+        }
       }
-      const id = ++this.reqCounter;
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        resolve({ ok: false, error: 'ZeroTTS synthesis timeout' });
-      }, 30000);
 
-      this.pending.set(id, { resolve, timer });
-      const payload = JSON.stringify({ id, text: cleanText, voice }) + '\n';
-      this.proc.stdin.write(payload);
+      const id = ++this.reqCounter;
+      const job = {
+        id,
+        text: cleanText,
+        voice,
+        priority: prio,
+        resolve,
+        enqueuedAt: Date.now(),
+        timer: null
+      };
+
+      if (job.priority === 0) {
+        const insertIdx = this.queue.findIndex(j => j.priority > 0);
+        if (insertIdx === -1) this.queue.push(job);
+        else this.queue.splice(insertIdx, 0, job);
+      } else {
+        this.queue.push(job);
+      }
+
+      // Nếu worker đang khởi động, đợi tối đa 12s
+      if (!this.ready) {
+        const startCheck = Date.now();
+        const waitTimer = setInterval(() => {
+          if (this.ready) {
+            clearInterval(waitTimer);
+            this.pumpQueue();
+          } else if (Date.now() - startCheck > 12000 || this.status === 'error' || this.status === 'stopped') {
+            clearInterval(waitTimer);
+            const idx = this.queue.indexOf(job);
+            if (idx !== -1) this.queue.splice(idx, 1);
+            resolve({ ok: false, error: `ZeroTTS chưa sẵn sàng (${this.status})` });
+          }
+        }, 250);
+        return;
+      }
+
+      this.pumpQueue();
     }).finally(() => {
       this.inflight.delete(dedupKey);
     });
@@ -259,9 +456,11 @@ const DEFAULT_STATE = {
   recentEvents: [],
   settings: {
     ttsEnabled: true,
-    ttsVoice: 'maichi',
+    ttsVoice: DEFAULT_TTS_VOICE,
     bgMusicEnabled: true,
     sfxEnabled: true,
+    musicVolume: 0.65,
+    ttsVolume: 0.95,
     smokeDensity: 1.0,
     autoSim: false,
     autoSimIntervalMs: 9500
@@ -280,12 +479,17 @@ function loadState() {
   try {
     if (fs.existsSync(STATE_FILE)) {
       const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      const savedSettings = { ...(saved.settings || {}) };
+      // Di trú giọng nữ Mai Chi cũ sang giọng nam trầm ấm mặc định
+      if (!savedSettings.ttsVoice || String(savedSettings.ttsVoice).toLowerCase() === 'maichi') {
+        savedSettings.ttsVoice = DEFAULT_TTS_VOICE;
+      }
       return {
         ...DEFAULT_STATE,
         ...saved,
         devotees: saved.devotees || {},
         offerings: { ...DEFAULT_STATE.offerings, ...(saved.offerings || {}) },
-        settings: { ...DEFAULT_STATE.settings, ...(saved.settings || {}) },
+        settings: { ...DEFAULT_STATE.settings, ...savedSettings },
         tiktok: { ...DEFAULT_STATE.tiktok }
       };
     }
@@ -333,18 +537,86 @@ function getLeaderboard(limit = 6) {
       lastWish: d.lastWish || ''
     }));
 }
+
+function getRecentDevotees(limit = 40) {
+  return Object.values(state.devotees)
+    .slice(-limit)
+    .reverse()
+    .map((d, index) => ({
+      rank: index + 1,
+      name: d.name,
+      uniqueId: d.uniqueId,
+      avatar: d.avatar || '',
+      merit: d.merit,
+      incense: d.incense || 0,
+      lastWish: d.lastWish || ''
+    }));
+}
+
+// Giữ bảng thí chủ ở mức hợp lý để file trạng thái và UI không phình vô hạn
+const MAX_DEVOTEES = 800;
+function pruneDevotees() {
+  const entries = Object.entries(state.devotees);
+  if (entries.length <= MAX_DEVOTEES) return;
+  entries.sort((a, b) => (b[1].merit || 0) - (a[1].merit || 0));
+  state.devotees = Object.fromEntries(entries.slice(0, MAX_DEVOTEES));
+}
 // Bộ lọc chặn ký tự lạ (Cuneiform 𒐫, Zalgo, Braille, ký tự spam) & từ ngữ phản cảm
-const WEIRD_SPAM_RE = /[\u{12000}-\u{1254F}\uFDFD\u2800-\u28FF\u2580-\u259F]|[\u0300-\u036F]{3,}/u;
+const WEIRD_SPAM_RE = /[\u1200-\u137F\u2800-\u28FF\u{12000}-\u{123FF}]/u;
+const VI_ACCENT_RE = /[ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝàáâãèéêìíòóôõùúýĂăĐđĨĩŨũƠơƯưẠ-ỹ]/;
+
+function formatDevoteeNameForTts(name) {
+  let clean = String(name || '').trim();
+  if (!clean) return 'thí chủ';
+
+  // 1. Bỏ ký tự @ ở đầu nếu là handle TikTok
+  clean = clean.replace(/^@+/, '');
+
+  // 2. Chuyển camelCase thành từ cách nhau (vd: QuynhFinn -> Quynh Finn)
+  clean = clean.replace(/([a-zà-ỹ])([A-ZÀ-Ỹ])/g, '$1 $2');
+
+  // 3. Thay thế các ký tự đặc biệt, gạch dưới, chấm bằng khoảng trắng
+  clean = clean
+    .replace(/[._\-+@#/\\()\[\]{}*&^%$#!~`=<>?|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 4. Nếu là user mặc định kiểu user12345, tiktok_user, hoặc chỉ toàn chữ số
+  if (/^(user|tiktok|id)?\d+$/i.test(clean) || /^\d+$/.test(clean) || clean.length < 2) {
+    return 'thí chủ';
+  }
+
+  // 5. Cắt bỏ các số đuôi năm sinh hoặc số ngẫu nhiên ở cuối (vd: "Quỳnh 2004" -> "Quỳnh", "Minh Tâm 99" -> "Minh Tâm")
+  clean = clean.replace(/\s+\d{2,4}$/, '').trim();
+  if (!clean || clean.length < 2) {
+    return 'thí chủ';
+  }
+
+  // 6. Giữ tối đa 3 từ cho tên gọn đẹp, tự nhiên
+  const words = clean.split(' ').filter(Boolean);
+  if (words.length > 3) {
+    clean = words.slice(0, 3).join(' ');
+  }
+
+  // 7. Tránh lặp tiền tố xưng hô
+  if (/^(thí chủ|thi chu|phật tử|phat tu|bạn|ban)(\s|$)/i.test(clean)) {
+    return clean;
+  }
+
+  return `thí chủ ${clean}`;
+}
 const BRACKET_EMOTE_RE = /\[[^\]]{1,24}\]/g;
 const ALLOWED_VI_TEXT_RE = /[^0-9a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝàáâãèéêìíòóôõùúýĂăĐđĨĩŨũƠơƯưẠ-ỹ\s.,!?]/g;
 const ALLOWED_VI_NAME_RE = /[^0-9a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝàáâãèéêìíòóôõùúýĂăĐđĨĩŨũƠơƯưẠ-ỹ\s._-]/g;
 const VI_LETTER_RE = /[a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝàáâãèéêìíòóôõùúýĂăĐđĨĩŨũƠơƯưẠ-ỹ]/g;
-const BAD_WORDS_RE = /(đá dái|địt|lồn|cặc|đm|vcl|vl|yamate|i cư|lừa đảo|lừa à|te-le gram|telegram|bố là trùm)/i;
+const BAD_WORDS_RE = /(đá dái|địt|lồn|cặc|buồi|dâm|đụ|đĩ|đm|dcm|clmm|vcl|vl|yamate|kimochi|i cư|lừa đảo|lừa à|te-le gram|telegram|zalo|bố mày|mẹ mày|\bchó\b|\bngu\b|\bmá\b|\bmẹ\b|chửi thề|khốn nạn|hồ chí minh|bác hồ|chính phủ|cộng sản|phản động)/i;
 
 function isBlockedSpamOrToxic(raw) {
   if (!raw) return true;
   const s = String(raw);
-  if (WEIRD_SPAM_RE.test(s)) return true;
+  try {
+    if (WEIRD_SPAM_RE.test(s)) return true;
+  } catch (_) {}
   if (BAD_WORDS_RE.test(s)) return true;
   return false;
 }
@@ -389,8 +661,46 @@ function sanitizeWishText(rawWish) {
   return cleaned;
 }
 
+function sanitizeGiftName(rawName, fallback) {
+  const cleaned = String(rawName || '')
+    .normalize('NFKC')
+    .normalize('NFC')
+    .replace(BRACKET_EMOTE_RE, ' ')
+    .replace(ALLOWED_VI_TEXT_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 48);
+  return cleaned || fallback;
+}
+
+// Danh sách người xem hiện diện trong phiên Live hiện tại (tránh tràn 48 người lịch sử cũ)
+const sessionDevoteesMap = new Map();
+
+function registerSessionDevotee(name, uniqueId, avatar) {
+  const cleanName = sanitizeUserName(name);
+  const key = uniqueId || cleanName;
+  if (!key) return;
+  sessionDevoteesMap.set(key, {
+    name: cleanName,
+    uniqueId: uniqueId || cleanName.toLowerCase().replace(/\s+/g, ''),
+    avatar: avatar || '',
+    lastActive: Date.now()
+  });
+  if (sessionDevoteesMap.size > 80) {
+    const oldestKey = sessionDevoteesMap.keys().next().value;
+    sessionDevoteesMap.delete(oldestKey);
+  }
+}
+
+function getSessionDevotees(limit = 48) {
+  return Array.from(sessionDevoteesMap.values())
+    .sort((a, b) => b.lastActive - a.lastActive)
+    .slice(0, limit);
+}
+
 function recordDevotee(user, uniqueId, avatar, meritDelta, incenseDelta = 0, giftDelta = 0, wish = '') {
   const displayName = sanitizeUserName(user || uniqueId);
+  registerSessionDevotee(displayName, uniqueId, avatar);
   const cleanWish = sanitizeWishText(wish);
   const key = (uniqueId || displayName).slice(0, 40);
   if (!state.devotees[key]) {
@@ -414,6 +724,7 @@ function recordDevotee(user, uniqueId, avatar, meritDelta, incenseDelta = 0, gif
 
   state.totalMerit += meritDelta;
   state.haloIntensity = Math.min(1.0, 0.35 + (state.totalMerit % 1000) / 1400);
+  if (Object.keys(state.devotees).length > MAX_DEVOTEES) pruneDevotees();
   return dev;
 }
 
@@ -441,13 +752,186 @@ function getPublicState() {
     activeIncenseSticks: state.activeIncenseSticks,
     haloIntensity: state.haloIntensity,
     offerings: state.offerings,
-    leaderboard: getLeaderboard(24),
+    leaderboard: getLeaderboard(48),
+    recentDevotees: getRecentDevotees(40),
+    sessionDevotees: getSessionDevotees(48),
     recentEvents: state.recentEvents.slice(0, 15),
     settings: state.settings,
     tiktok: state.tiktok,
-    tts: zeroTts ? zeroTts.getStatus() : { ready: false, status: 'init', voice: 'maichi' }
+    tts: zeroTts ? zeroTts.getStatus() : { ready: false, status: 'init', voice: DEFAULT_TTS_VOICE }
   };
 }
+
+// ============================================================================
+// HỆ THỐNG LỜI CHÚC PHẬT PHÁP ĐA DẠNG & TRANG NGHIÊM (DIVERSE BLESSINGS ENGINE)
+// - Đa dạng hoá lời chúc, không lặp lại câu vừa đọc
+// - Ngắn gọn, súc tích (50-80 ký tự) để ZeroTTS tổng hợp siêu tốc (<1.3s)
+// - Mang đậm ngôn phong Phật giáo trang nghiêm, an lạc, hoan hỷ
+// ============================================================================
+const blessingHistoryMap = new Map();
+
+function getDiverseBlessing(category, builderList, context) {
+  if (!builderList || builderList.length === 0) return '';
+  let history = blessingHistoryMap.get(category);
+  if (!history) {
+    history = [];
+    blessingHistoryMap.set(category, history);
+  }
+  const availableIndices = [];
+  for (let i = 0; i < builderList.length; i++) {
+    if (!history.includes(i)) availableIndices.push(i);
+  }
+  const pool = availableIndices.length > 0 ? availableIndices : Array.from({ length: builderList.length }, (_, i) => i);
+  const chosenIndex = pool[Math.floor(Math.random() * pool.length)];
+  history.push(chosenIndex);
+  if (history.length > Math.min(6, builderList.length - 1)) {
+    history.shift();
+  }
+  const builder = builderList[chosenIndex];
+  return typeof builder === 'function' ? builder(context) : builder;
+}
+
+function detectWishTopic(text) {
+  const s = toAsciiLower(text);
+  if (/\b(thi|hoc|do dat|nguyen vong|tot nghiep|bang gioi|hoc bong|qua mon|on thi|diem cao|cap 3|dai hoc|ielts|toeic|lop 10|si tu|truong y|bach khoa)\b/.test(s)) {
+    return 'study';
+  }
+  if (/\b(cong viec|kpi|di lam|phong van|xin viec|sep|dong nghiep|tang luong|thang chuc|su nghiep|cong danh|hop dong|thu viec|bien che)\b/.test(s)) {
+    return 'career';
+  }
+  if (/\b(chot don|buon ban|ban hang|khach|kinh doanh|dat hang|tien ve|tai loc|phat tai|tai tan bao|giau|tien vo|doanh so|dat khach|mua may ban dat)\b/.test(s)) {
+    return 'business';
+  }
+  if (/\b(tinh duyen|thoat e|nguoi yeu|tri ky|nguoi thuong|ket hon|lay chong|lay vo|duyen lanh|ban doi|hon nhan|nguoi yeu cu|gap duyen)\b/.test(s)) {
+    return 'love';
+  }
+  if (/\b(ngu ngon|overthinking|chua lanh|healing|lo au|tram cam|met moi|ap luc|tam an|buong bo|thanh than|an nhien|nang luong|mat ngu|met)\b/.test(s)) {
+    return 'healing';
+  }
+  if (/\b(cha me|bo me|ong ba|con cai|con yeu|gia dinh|gia dao|bao hieu|khoi benh|suc khoe|manh khoe|truong tho|binh phuc|tai qua nan khoi)\b/.test(s)) {
+    return 'family';
+  }
+  return 'general';
+}
+
+const TOPIC_BLESSINGS = {
+  study: [
+    ({ name }) => `Thầy kính chúc ${name} tâm trí sáng suốt, trí tuệ mở mang, thi cử hanh thông, tương lai rạng ngời như ý!`,
+    ({ name }) => `Nguyện Tam Bảo gia hộ cho ${name} học sâu hiểu rộng, làm bài tự tin, thi đâu đỗ đó, danh đề bảng vàng!`,
+    ({ name }) => `Chúc ${name} tâm an trí sáng, vượt qua mọi thử thách học vấn, đón trọn niềm vui đỗ đạt ước mơ!`,
+    ({ name }) => `Cầu cho ${name} công thành danh toại, trí tuệ khai hoa, con đường học vấn rộng mở, tương lai tươi sáng!`
+  ],
+  career: [
+    ({ name }) => `Thầy kính chúc ${name} công việc hanh thông, sự nghiệp thăng hoa, gặp quý nhân nâng đỡ, tài lộc dồi dào!`,
+    ({ name }) => `Nguyện Tam Bảo gia hộ cho ${name} làm việc gì cũng xuôi chèo mát mái, đồng nghiệp tin yêu, tiền tài tấn tới!`,
+    ({ name }) => `Chúc ${name} vững vàng bản lĩnh, vượt qua mọi áp lực, công danh ngày càng rộng mở, lương thưởng đủ đầy!`,
+    ({ name }) => `Cầu chúc cho con đường sự nghiệp của ${name} ngày càng vững chãi, tài năng tỏa sáng, vạn sự thành công!`
+  ],
+  business: [
+    ({ name }) => `Thầy kính chúc ${name} kinh doanh thuận buồm xuôi gió, buôn may bán đắt, tài lộc dồi dào, tiền tài tấn tới!`,
+    ({ name }) => `Nguyện chư Phật gia hộ cho công việc làm ăn của ${name} ngày càng hưng thịnh, khách quý tin yêu, lộc tài vững bền!`,
+    ({ name }) => `Chúc ${name} mua may bán đắt, vạn sự hanh thông, hàng đi tiền về suôn sẻ, làm ăn phát đạt ấm no!`,
+    ({ name }) => `Cầu chúc cho cơ nghiệp của ${name} ngày càng phát triển, uy tín lan xa, quý nhân tương trợ, tài lộc sum vầy!`
+  ],
+  love: [
+    ({ name }) => `Chúc ${name} duyên lành hội tụ, gặp được người chân thành thấu hiểu, cùng nhau sẻ chia buồn vui, hạnh phúc bền lâu!`,
+    ({ name }) => `Nguyện cho ${name} tình cảm vuông tròn, tìm được bến đỗ bình an của cuộc đời, tâm hồn luôn ấm áp an vui!`,
+    ({ name }) => `Cầu cho nhân duyên của ${name} luôn tốt đẹp, gặp người biết trân trọng nâng niu, xây đắp tương lai hòa thuận!`,
+    ({ name }) => `Chúc ${name} tâm hồn an yên, sớm tìm thấy tri kỷ đồng điệu, cuộc sống ngập tràn yêu thương và tiếng cười!`
+  ],
+  healing: [
+    ({ name }) => `Tâm an thì vạn sự an. Thầy chúc ${name} buông bỏ mọi muộn phiền, tối nay ngủ thật ngon, thức dậy ngập tràn năng lượng mới!`,
+    ({ name }) => `Nơi cửa Phật thanh tịnh, cầu cho tâm hồn ${name} luôn an yên nhẹ nhõm, xua tan áp lực, mỗi ngày đều là một ngày hạnh phúc!`,
+    ({ name }) => `Điều gì qua rồi hãy nhẹ nhàng buông tay. Thầy chúc ${name} tìm thấy bình yên tự đáy lòng, cuộc sống luôn thanh thản an nhiên!`,
+    ({ name }) => `Hít vào tâm tĩnh lặng, thở ra miệng mỉm cười. Chúc ${name} luôn an lạc, yêu đời và đón nhận vạn điều tốt lành!`
+  ],
+  family: [
+    ({ name }) => `Kính chúc gia đình ${name} trên thuận dưới hòa, cha mẹ mạnh khỏe trường thọ, con cháu hiếu thảo, gia quyến bình an!`,
+    ({ name }) => `Nguyện Tam Bảo che chở cho người thân của ${name} thân thể an khang, tai qua nạn khỏi, bệnh tật tiêu trừ, phúc thọ miên viễn!`,
+    ({ name }) => `Một nén tâm hương dâng Phật mười phương. Cầu chúc cho mái ấm của ${name} luôn ấm êm, tràn ngập tiếng cười và hỷ lạc!`,
+    ({ name }) => `Cảm tạ tấm lòng hiếu nghĩa của ${name}. Chúc cho gia đình thí chủ phúc đức sâu dày, con cháu thành đạt, gia đạo hưng thịnh!`
+  ],
+  general: [
+    ({ name }) => `Nam Mô A Di Đà Phật. Thầy kính chúc ${name} thân tâm thường an lạc, trí tuệ sáng suốt, vạn sự hanh thông, sở cầu như ý!`,
+    ({ name }) => `Lành thay thiện niệm của ${name}. Cầu xin Tam Bảo gia hộ cho thí chủ cùng gia quyến luôn bình an, bốn mùa an khang!`,
+    ({ name }) => `Tâm an thì vạn sự an. Thầy chúc ${name} cuộc sống luôn nhẹ nhàng thanh thản, gặp nhiều duyên lành và ngập tràn niềm vui!`,
+    ({ name }) => `Một nén tâm hương kết vạn niềm phúc. Kính chúc ${name} tai ách tiêu trừ, phước đức tăng trưởng, công việc thuận buồm xuôi gió!`,
+    ({ name }) => `Cảm tạ tấm lòng hướng Phật của ${name}. Nguyện chúc thí chủ đi đâu cũng có quý nhân nâng đỡ, mọi sự mưu cầu đều cát tường!`,
+    ({ name }) => `Ánh từ quang soi chiếu muôn nơi. Thầy cầu chúc cho ${name} tâm hồn luôn thanh tịnh, gia đạo ấm êm, phúc lộc vững bền!`,
+    ({ name }) => `Hữu duyên tương ngộ chốn thiền môn. Chúc ${name} buông bỏ mọi phiền muộn, mỗi ngày trôi qua đều là một ngày bình an may mắn!`,
+    ({ name }) => `Tri ân lời nguyện lành của ${name}. Kính chúc thí chủ sức khỏe dồi dào, sở nguyện sớm thành, vạn sự viên mãn!`
+  ]
+};
+
+function getContextualBlessing(name, wish) {
+  const topic = detectWishTopic(wish);
+  const list = TOPIC_BLESSINGS[topic] || TOPIC_BLESSINGS.general;
+  return getDiverseBlessing(`topic_${topic}`, list, { name, wish });
+}
+
+const GIFT_BLESSINGS = [
+  ({ name, gift }) => `Công đức vô lượng! Tri ân tấm lòng thơm thảo của ${name} dâng cúng ${gift}. Thầy kính chúc thí chủ thân tâm an lạc, tài lộc hanh thông, vạn sự như ý!`,
+  ({ name, gift }) => `Lành thay thiện niệm của ${name} dâng cúng ${gift}. Một phần phát tâm, muôn phần phước báu. Nguyện cho thí chủ công việc thăng hoa, gia đạo ấm êm!`,
+  ({ name, gift }) => `Cảm tạ ${name} đã phát tâm cúng dường ${gift} lên Tam Bảo. Kính chúc thí chủ tâm an trí sáng, tai ương hóa giải, cuộc sống ngập tràn hỷ lạc!`,
+  ({ name, gift }) => `Nam Mô Hoan Hỷ Tạng Bồ Tát. Tri ân tấm lòng vàng của ${name} dâng ${gift}. Chúc thí chủ mọi sự mưu cầu đều cát tường, tiền tài sung túc!`,
+  ({ name, gift }) => `Ánh từ quang chư Phật mười phương chứng tri lòng thành của ${name} dâng ${gift}. Cầu chúc cho gia quyến thí chủ luôn mạnh khỏe, phúc thọ tăng long!`,
+  ({ name, gift }) => `Cảm tạ ${name} đã gieo duyên lành cúng dường ${gift}. Nguyện cầu chư Phật gia hộ cho mọi ước nguyện của thí chủ sớm thành hiện thực tốt đẹp!`,
+  ({ name, gift }) => `Tri ân sâu sắc tấm lòng thiện lành của ${name} dâng ${gift}. Chúc thí chủ công thành danh toại, phước đức sâu dày, gia đạo thuận hòa yên ấm!`,
+  ({ name, gift }) => `Đóa hoa tâm nở rộ nơi cửa Phật. Cảm tạ ${name} dâng ${gift}. Thầy chúc thí chủ mỗi ngày đều an vui, may mắn ngập tràn, vạn điều như ý!`,
+  ({ name, gift }) => `Công đức thù thắng! Cảm tạ ${name} phát tâm dâng ${gift}. Nguyện hồng ân Tam Bảo che chở cho thí chủ thân tâm an lạc, tài lộc vững bền!`,
+  ({ name, gift }) => `Lành thay tâm thiện của ${name} dâng ${gift}. Cầu cho cha mẹ thí chủ trường thọ bình an, gia đình hưng vượng, bốn mùa cát tường!`
+];
+
+const INCENSE_BLESSINGS = [
+  ({ name, wish }) => `Khói trầm quyện tỏa Tam Bảo chứng tri. Tri ân ${name} dâng hương. Cầu chúc thí chủ thân tâm an lạc, vạn sự hanh thông: ${wish}!`,
+  ({ name, wish }) => `Một nén tâm hương, muôn phần phước báu. Cảm tạ ${name} thành tâm hướng Phật. Chúc thí chủ gia đạo bình an, sở cầu như ý!`,
+  ({ name, wish }) => `Nam Mô A Di Đà Phật. Chứng tri lòng thành của ${name} dâng nén hương thơm. Kính chúc thí chủ tai qua nạn khỏi, phúc lộc vững bền!`,
+  ({ name, wish }) => `Hương trầm thơm ngát mười phương. Kính chúc ${name} bốn mùa an khang, quý nhân phù trợ, công việc thuận buồm xuôi gió!`,
+  ({ name, wish }) => `Lành thay ${name} dâng hương bái Phật cầu an. Nguyện cho lời nguyện lành của thí chủ sớm ngày viên mãn cát tường!`,
+  ({ name, wish }) => `Gieo một duyên lành nơi cửa Phật. Cầu chúc cho ${name} cùng gia quyến luôn mạnh khỏe, tâm an trí sáng, ngập tràn hỷ lạc!`,
+  ({ name, wish }) => `Tâm thành Phật chứng. Thầy kính chúc ${name} thân thể an khang, tài lộc hanh thông, mọi sự mưu cầu đều đơm hoa kết trái!`
+];
+
+const COMMENT_BLESSINGS = [
+  ({ name, wish }) => getContextualBlessing(name, wish),
+  ({ name, wish }) => `Nam Mô A Di Đà Phật. Chứng tri lòng thành của ${name}: ${wish}. Kính chúc thí chủ thân tâm an lạc, vạn sự cát tường!`,
+  ({ name, wish }) => `Cảm tạ thiện niệm của ${name}. Cầu cho sở nguyện ${wish} sớm ngày viên mãn, cuộc sống ngập tràn phước lành!`,
+  ({ name, wish }) => `Tri ân lời nguyện lành của ${name}. Chúc thí chủ tâm an trí sáng, phúc đức sâu dày, gia đạo an vui!`
+];
+
+const LIKE_BLESSINGS = [
+  ({ name }) => `Cảm tạ ${name} hoan hỷ thả tim kết duyên lành cùng đạo tràng. Kính chúc thí chủ thân tâm thường an lạc!`,
+  ({ name }) => `Tri ân ${name} đã thả tim kính lễ mười phương chư Phật. Chúc thí chủ vạn sự hanh thông, an khang cát tường!`,
+  ({ name }) => `Lành thay công đức thả tim gieo duyên bái Phật của ${name}. Cầu cho thí chủ luôn gặp nhiều may mắn phúc lành!`,
+  ({ name }) => `Cảm tạ ${name} hoan hỷ trợ duyên, kính chúc thí chủ tâm an trí sáng, bốn mùa bình an tươi sáng!`,
+  ({ name }) => `Tấm lòng hướng Phật, phước báu vô biên. Tri ân ${name} đã thả tim trợ duyên cho phòng Live thanh tịnh!`,
+  ({ name }) => `Hoan hỷ tán thán công đức của ${name}. Thầy kính chúc thí chủ mọi sự như ý, gia đạo ấm êm hạnh phúc!`
+];
+
+const NEWCOMER_BLESSINGS = [
+  ({ name }) => `Chào mừng ${name} đã quang lâm Chánh Điện bái Phật. Kính chúc thí chủ một ngày tràn đầy hỷ lạc và bình an!`,
+  ({ name }) => `Hoan hỷ đón chào ${name} hữu duyên ghé thăm Chùa Online. Cầu chúc cho thí chủ vạn sự hanh thông, phúc đức tròn đầy!`,
+  ({ name }) => `Kính chào ${name}. Nguyện cầu ánh từ quang chư Phật soi chiếu che chở cho thí chủ cùng gia quyến bình an!`,
+  ({ name }) => `Chào mừng thiện nam tín nữ ${name} về nơi cửa thiền thanh tịnh. Chúc thí chủ buông bỏ âu lo, tâm hồn nhẹ nhõm!`,
+  ({ name }) => `Hữu duyên tương ngộ nơi Tam Bảo, kính chúc ${name} thân thể an khang, sở cầu như ý, vạn điều tốt lành!`,
+  ({ name }) => `Nam Mô A Di Đà Phật. Chào mừng ${name} đã về bái Phật cầu an. Chúc thí chủ cuộc sống ngập tràn an vui!`
+];
+
+const BELL_BLESSINGS = [
+  ({ name, wish }) => `Tiếng chuông Đại Hồng Chung ngân vang, phiền não tiêu tan, trí tuệ sáng ngời. Thầy chúc ${name} thân tâm thanh tịnh, vạn sự an nhiên!`,
+  ({ name, wish }) => `Chuông chùa ngân nga mười phương chứng tri. Cảm tạ ${name} thỉnh chuông cầu nguyện: ${wish}. Cầu cho tai ách hóa cát tường!`,
+  ({ name, wish }) => `Âm ba chuông đồng thức tỉnh lòng người. Kính chúc ${name} cùng gia quyến luôn bình an, mạnh khỏe, sở cầu như ý!`,
+  ({ name, wish }) => `Tiếng chuông Bát Nhã ngân vang dẫn lối. Cầu chúc cho ${name} tâm an trí sáng, công việc thuận buồm xuôi gió, phúc lộc vững bền!`,
+  ({ name, wish }) => `Thỉnh một tiếng chuông, tiêu muôn vàn phiền não. Chúc ${name} buông bỏ mọi âu lo, cuộc sống ngập tràn hỷ lạc và bình yên!`
+];
+
+const PRAYER_BLESSINGS = [
+  ({ name, wish }) => `Ánh hoa đăng lung linh dâng lên Tam Bảo. Nguyện cho lời ước nguyện của ${name}: ${wish} sớm ngày thành tựu viên mãn!`,
+  ({ name, wish }) => `Thả ngọn đèn đăng gửi trọn tâm thành. Thầy kính chúc ${name} thân tâm an lạc, tai qua nạn khỏi, gia đạo thuận hòa yên ấm!`,
+  ({ name, wish }) => `Hoa đăng tỏ rạng dẫn lối bình an. Cầu cho sở nguyện của ${name} đơm hoa kết trái, cuộc đời ngập tràn ánh sáng và may mắn!`,
+  ({ name, wish }) => `Một ngọn đèn lưu ly, vạn lời nguyện ước. Cảm tạ ${name} thành tâm hướng Phật, chúc thí chủ vạn sự cát tường hanh thông!`,
+  ({ name, wish }) => `Nguyện ánh sáng hoa đăng soi đường dẫn lối cho ${name}. Chúc thí chủ luôn gặp quý nhân phù trợ, hạnh phúc đong đầy!`
+];
 
 // ============================================================================
 // 4. NGHI THỨC TƯƠNG TÁC (RITUAL HANDLERS)
@@ -465,9 +949,15 @@ const Rituals = {
     state.activeIncenseSticks = Math.min(36, state.activeIncenseSticks + count);
     const devotee = recordDevotee(user, uniqueId, avatar, merit, count, 0, wish);
 
+    const ttsDevoteeName = formatDevoteeNameForTts(devotee.name);
+    const defaultTts = getDiverseBlessing('incense', INCENSE_BLESSINGS, {
+      name: ttsDevoteeName,
+      count,
+      wish
+    });
     const ttsText = params.readTts === false
       ? ''
-      : `Nam mô A Di Đà Phật. Cảm tạ thí chủ ${devotee.name} đã thành tâm thắp ${count} nén hương thơm. ${wish}.`;
+      : (params.customTts || defaultTts);
 
     const event = pushEventLog({
       type: 'burnIncense',
@@ -478,7 +968,66 @@ const Rituals = {
       merit,
       wish,
       ttsText,
-      ttsVoice: state.settings.ttsVoice || 'maichi'
+      ttsPriority: 0,
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
+    });
+
+    saveState();
+    broadcastNotification('temple.event', { event, state: getPublicState() });
+    return { event, state: getPublicState() };
+  },
+
+  likeBow(params = {}) {
+    const user = sanitizeUserName(params.user);
+    const uniqueId = params.uniqueId || '';
+    const avatar = params.avatar || '';
+    const merit = 5;
+
+    const devotee = recordDevotee(user, uniqueId, avatar, merit, 0, 0, 'Thả tim kính lễ Đức Phật');
+    const ttsDevoteeName = formatDevoteeNameForTts(devotee.name);
+    const defaultTts = getDiverseBlessing('like', LIKE_BLESSINGS, {
+      name: ttsDevoteeName
+    });
+    const ttsText = params.readTts ? defaultTts : '';
+
+    const event = pushEventLog({
+      type: 'likeBow',
+      user: devotee.name,
+      uniqueId: devotee.uniqueId,
+      avatar: devotee.avatar,
+      merit,
+      wish: 'Thả tim kính lễ Đức Phật',
+      ttsText,
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
+    });
+
+    saveState();
+    broadcastNotification('temple.event', { event, state: getPublicState() });
+    return { event, state: getPublicState() };
+  },
+
+  newcomerBow(params = {}) {
+    const user = sanitizeUserName(params.user);
+    const uniqueId = params.uniqueId || '';
+    const avatar = params.avatar || '';
+    const merit = 2;
+
+    const devotee = recordDevotee(user, uniqueId, avatar, merit, 0, 0, 'Quang lâm Chánh Điện bái Phật');
+    const ttsDevoteeName = formatDevoteeNameForTts(devotee.name);
+    const defaultTts = getDiverseBlessing('newcomer', NEWCOMER_BLESSINGS, {
+      name: ttsDevoteeName
+    });
+    const ttsText = params.readTts ? defaultTts : '';
+
+    const event = pushEventLog({
+      type: 'newcomerBow',
+      user: devotee.name,
+      uniqueId: devotee.uniqueId,
+      avatar: devotee.avatar,
+      merit,
+      wish: 'Quang lâm Chánh Điện bái Phật',
+      ttsText,
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
     });
 
     saveState();
@@ -522,9 +1071,12 @@ const Rituals = {
     state.bellRings += count;
     const devotee = recordDevotee(user, uniqueId, avatar, merit, 0, 0, wish);
 
-    const ttsText = params.readTts
-      ? `Thí chủ ${devotee.name} thỉnh Đại Hồng Chung cầu nguyện: ${wish}.`
-      : '';
+    const ttsDevoteeName = formatDevoteeNameForTts(devotee.name);
+    const defaultTts = getDiverseBlessing('bell', BELL_BLESSINGS, {
+      name: ttsDevoteeName,
+      wish
+    });
+    const ttsText = params.readTts ? defaultTts : '';
 
     const event = pushEventLog({
       type: 'ringBell',
@@ -535,7 +1087,8 @@ const Rituals = {
       merit,
       wish,
       ttsText,
-      ttsVoice: state.settings.ttsVoice || 'maichi'
+      ttsPriority: 0,
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
     });
 
     saveState();
@@ -553,9 +1106,11 @@ const Rituals = {
     state.lanternCount += 1;
     const devotee = recordDevotee(user, uniqueId, avatar, merit, 1, 0, wish);
 
-    const ttsText = params.readTts === false
-      ? ''
-      : `Lời cầu nguyện của thí chủ ${devotee.name}: ${wish}. Nam mô A Di Đà Phật.`;
+    const defaultTts = getDiverseBlessing('prayer', PRAYER_BLESSINGS, {
+      name: devotee.name,
+      wish
+    });
+    const ttsText = params.readTts === false ? '' : defaultTts;
 
     const event = pushEventLog({
       type: 'sendPrayer',
@@ -565,7 +1120,7 @@ const Rituals = {
       wish,
       merit,
       ttsText,
-      ttsVoice: state.settings.ttsVoice || 'maichi'
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
     });
 
     saveState();
@@ -588,20 +1143,25 @@ const Rituals = {
       lamp: 'Đèn Lưu Ly Trí Tuệ',
       dragon: 'Đại Lễ Kim Long Chầu Phật'
     };
-    const giftName = params.giftName || giftLabels[giftType];
+    const giftName = sanitizeGiftName(params.giftName, giftLabels[giftType]);
     const multiplier = coins >= 100 ? 50 : coins >= 10 ? 30 : 20;
-    const merit = Math.max(20, coins * multiplier);
+    const merit = Math.max(20, Math.round(coins * multiplier));
 
     state.offerings[giftType] = (state.offerings[giftType] || 0) + 1;
     state.totalIncense += 3;
     state.activeIncenseSticks = Math.min(36, state.activeIncenseSticks + 3);
 
-    const wish = params.wish || `Dâng cúng ${giftName} lên Tam Bảo`;
+    const wish = sanitizeWishText(params.wish) || `Dâng cúng ${giftName} lên Tam Bảo`;
     const devotee = recordDevotee(user, uniqueId, avatar, merit, 3, 1, wish);
 
+    const ttsDevoteeName = formatDevoteeNameForTts(devotee.name);
+    const defaultTts = getDiverseBlessing('gift', GIFT_BLESSINGS, {
+      name: ttsDevoteeName,
+      gift: giftName
+    });
     const ttsText = params.readTts === false
       ? ''
-      : `Công đức vô lượng! Cảm tạ thí chủ ${devotee.name} đã phát tâm dâng cúng ${giftName}, tích thêm ${merit} điểm công đức. Nguyện cầu chư Phật gia hộ cho thí chủ vạn sự cát tường như ý.`;
+      : (params.customTts || defaultTts);
 
     const event = pushEventLog({
       type: giftType === 'dragon' ? 'grandCeremony' : 'offerGift',
@@ -614,7 +1174,8 @@ const Rituals = {
       merit,
       wish,
       ttsText,
-      ttsVoice: state.settings.ttsVoice || 'maichi'
+      ttsPriority: 0,
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
     });
 
     saveState();
@@ -633,9 +1194,10 @@ const Rituals = {
     state.fortuneCount += 1;
     const devotee = recordDevotee(user, uniqueId, avatar, merit, 0, 0, `Xin xăm: Quẻ số ${fortune.number} (${fortune.rank})`);
 
+    const ttsDevoteeName = formatDevoteeNameForTts(devotee.name);
     const ttsText = params.readTts === false
       ? ''
-      : `Thí chủ ${devotee.name} vừa gieo được ${fortune.ttsSummary}`;
+      : `${ttsDevoteeName} vừa gieo được ${fortune.ttsSummary}`;
 
     const event = pushEventLog({
       type: 'drawFortune',
@@ -646,7 +1208,7 @@ const Rituals = {
       fortune,
       merit,
       ttsText,
-      ttsVoice: state.settings.ttsVoice || 'maichi'
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
     });
 
     saveState();
@@ -663,11 +1225,63 @@ const Rituals = {
     });
   },
 
+  adminNotice(params = {}) {
+    const title = String(params.title || 'THÔNG BÁO TỪ CHÙA LINH ỨNG').trim().slice(0, 80);
+    const message = String(params.message || params.content || '').trim().slice(0, 500);
+    const priority = ['high', 'normal', 'urgent'].includes(params.priority) ? params.priority : 'normal';
+    const duration = params.duration ? Math.max(5000, Math.min(60000, Number(params.duration))) : 0;
+    const readTts = params.readTts !== false;
+
+    if (!message) {
+      throw new Error('Nội dung thông báo không được để trống');
+    }
+
+    let ttsText = '';
+    if (readTts) {
+      const fullText = `${title}. ${message}`.trim();
+      ttsText = fullText.length > 160 ? fullText.slice(0, 160).replace(/[.,;!?]\s*[^.,;!?]*$/, '') + '.' : fullText;
+    }
+
+    const event = pushEventLog({
+      type: 'adminNotice',
+      title,
+      message,
+      priority,
+      duration,
+      ttsText,
+      ttsPriority: 0,
+      ttsVoice: state.settings.ttsVoice || DEFAULT_TTS_VOICE
+    });
+
+    saveState();
+    broadcastNotification('temple.event', { event, state: getPublicState() });
+    return { event, state: getPublicState() };
+  },
+
   updateSettings(params = {}) {
-    state.settings = {
-      ...state.settings,
-      ...params
-    };
+    const next = { ...state.settings };
+    const boolKeys = ['ttsEnabled', 'bgMusicEnabled', 'sfxEnabled', 'autoSim'];
+    const numKeys = { musicVolume: [0, 1], ttsVolume: [0, 1], smokeDensity: [0, 2] };
+
+    for (const key of boolKeys) {
+      if (typeof params[key] === 'boolean') next[key] = params[key];
+    }
+    for (const [key, [min, max]] of Object.entries(numKeys)) {
+      const v = Number(params[key]);
+      if (Number.isFinite(v)) next[key] = Math.max(min, Math.min(max, v));
+    }
+    if (Number.isFinite(Number(params.autoSimIntervalMs))) {
+      next.autoSimIntervalMs = Math.max(3000, Math.min(120000, Number(params.autoSimIntervalMs)));
+    }
+    if (typeof params.ttsVoice === 'string') {
+      const wanted = params.ttsVoice.trim().toLowerCase();
+      const available = zeroTts?.voices?.length ? zeroTts.voices : [];
+      if (!available.length || available.includes(wanted)) {
+        next.ttsVoice = wanted;
+      }
+    }
+
+    state.settings = next;
     if (typeof params.autoSim === 'boolean') {
       configureAutoSim(params.autoSim);
     }
@@ -700,6 +1314,26 @@ let tiktokConn = null;
 
 const commentCooldownMap = new Map();
 
+// Bỏ dấu tiếng Việt để so khớp từ khóa không dấu/có dấu thống nhất một lần
+function toAsciiLower(text) {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase()
+    .trim();
+}
+
+let globalLastTtsDispatch = 0;
+const KEYWORD_PATTERNS = {
+  fortune: /\b(xin xam|gieo que|rut que|que xam|xin que)\b/,
+  bell: /\b(thinh chuong|chuong|danh chuong|go chuong)\b/,
+  woodenFish: /\b(go mo|tung kinh)\b/,
+  prayer: /\b(nam mo|mo phat|a di da|adida|adidaphat|a di da phat|cau|nguyen|binh an|tai loc|chuc|xin loc|cau an|cau phuc|phu ho|do tri|an lanh|suc khoe|may man|thanh cong|hoan hy|an lac|tam an|phat phap|niem phat|sam hoi|gia dao|van su|nhu y|tien tai|khoe manh|hanh phuc|thi|do dat|qua mon|hoc|dai hoc|tot nghiep|kpi|cong viec|tang luong|phong van|chot don|buon ban|ban dat|thoat e|nguoi yeu|healing|chua lanh|ngu ngon|overthinking|cha me|bo me|ong ba|con yeu)\b/,
+  incense: /\b(thap huong|dang huong|thap nhang|dang nhang|bai phat|lay phat|le phat|danh le|kinh le|con lay|lay|nhang|cung phat|cung duong|dang le|vai phat)\b/
+};
+
 function parseViewerComment(commentText, user, uniqueId, avatar) {
   const raw = String(commentText || '').trim();
   if (!raw || isBlockedSpamOrToxic(raw)) {
@@ -711,12 +1345,12 @@ function parseViewerComment(commentText, user, uniqueId, avatar) {
     return null;
   }
 
-  // Chống 1 người spam bình luận liên tục làm nghẽn hàng đợi TTS (cooldown 3.5 giây/người)
+  // Chống 1 người spam bình luận liên tục làm nghẽn hàng đợi TTS (cooldown 3 giây/người)
   const userKey = uniqueId || user || '';
   const now = Date.now();
   if (userKey) {
     const lastTs = commentCooldownMap.get(userKey) || 0;
-    if (now - lastTs < 3500) {
+    if (now - lastTs < 3000) {
       return null;
     }
     commentCooldownMap.set(userKey, now);
@@ -727,69 +1361,88 @@ function parseViewerComment(commentText, user, uniqueId, avatar) {
   }
 
   const cleanUser = sanitizeUserName(user);
-  const lower = cleanWish.toLowerCase();
+  registerSessionDevotee(cleanUser, uniqueId, avatar);
+  const lower = toAsciiLower(cleanWish);
 
   // 1. Xin xăm / Gieo quẻ
-  if (
-    lower.includes('xin xăm') ||
-    lower.includes('xin xam') ||
-    lower.includes('gieo quẻ') ||
-    lower.includes('gieo que') ||
-    lower.includes('rút quẻ') ||
-    lower.includes('rut que') ||
-    lower.includes('quẻ') ||
-    lower.includes('que')
-  ) {
+  if (KEYWORD_PATTERNS.fortune.test(lower)) {
     return Rituals.drawFortune({ user: cleanUser, uniqueId, avatar, topic: cleanWish });
   }
-
   // 2. Thỉnh chuông
-  if (lower.includes('chuông') || lower.includes('chuong') || lower.includes('thỉnh chuông')) {
-    return Rituals.ringBell({ user: cleanUser, uniqueId, avatar, count: 1, wish: cleanWish, readTts: true });
+  if (KEYWORD_PATTERNS.bell.test(lower)) {
+    return Rituals.ringBell({ user: cleanUser, uniqueId, avatar, count: 1, wish: cleanWish, readTts: false });
   }
-
   // 3. Gõ mõ
-  if (lower.includes('gõ mõ') || lower.includes('go mo') || lower.includes('tụng kinh')) {
+  if (KEYWORD_PATTERNS.woodenFish.test(lower)) {
     return Rituals.strikeWoodenFish({ user: cleanUser, uniqueId, avatar, count: 3 });
   }
+  // 4. Thắp hương / Cầu chúc / Bái Phật / Lời nguyện:
+  // BƯỚC LÊN BẬC THỀM GỖ ĐẢNH LỄ TAM BÁI & ĐỌC LỜI CẦU CHÚC XƯNG DANH THÍ CHỦ!
+  if (KEYWORD_PATTERNS.incense.test(lower) || KEYWORD_PATTERNS.prayer.test(lower)) {
+    // Giới hạn tần suất đọc TTS bình luận tối đa 1 câu mỗi 8 giây để không làm nghẽn CPU
+    const canReadTts = (now - globalLastTtsDispatch > 8000);
+    if (canReadTts) globalLastTtsDispatch = now;
 
-  // 4. Thắp hương / Bái Phật
-  if (
-    lower.includes('thắp hương') ||
-    lower.includes('thap huong') ||
-    lower.includes('dâng hương') ||
-    lower.includes('dang huong') ||
-    lower.includes('bái phật') ||
-    lower.includes('bai phat') ||
-    lower.includes('lạy phật') ||
-    lower.includes('lay phat')
-  ) {
-    return Rituals.burnIncense({ user: cleanUser, uniqueId, avatar, count: 3, wish: cleanWish });
+    const ttsDevoteeName = formatDevoteeNameForTts(cleanUser);
+    const wishTts = getContextualBlessing(ttsDevoteeName, cleanWish);
+
+    return Rituals.burnIncense({
+      user: cleanUser,
+      uniqueId,
+      avatar,
+      count: 3,
+      wish: cleanWish,
+      readTts: canReadTts,
+      customTts: wishTts
+    });
   }
 
-  // 5. Cầu nguyện / Thả đèn hoa đăng
-  if (
-    lower.includes('cầu') ||
-    lower.includes('cau ') ||
-    lower.includes('nguyện') ||
-    lower.includes('nguyen') ||
-    lower.includes('nam mô') ||
-    lower.includes('nam mo') ||
-    lower.includes('mô phật') ||
-    lower.includes('mo phat') ||
-    lower.includes('a di đà') ||
-    lower.includes('a di da') ||
-    lower.includes('bình an') ||
-    lower.includes('tài lộc') ||
-    lower.includes('chúc')
-  ) {
-    return Rituals.sendPrayer({ user: cleanUser, uniqueId, avatar, wish: cleanWish });
-  }
-
-  return Rituals.burnIncense({ user: cleanUser, uniqueId, avatar, count: 1, wish: cleanWish });
+  // Bình luận thông thường: vẫn ghi nhận hiện diện, hiển thị bong bóng chat
+  const devotee = recordDevotee(cleanUser, uniqueId, avatar, 1, 0, 0, cleanWish);
+  broadcastNotification('temple.chat', {
+    user: devotee.name,
+    uniqueId: devotee.uniqueId,
+    avatar: devotee.avatar,
+    text: cleanWish,
+    timestamp: now
+  });
+  scheduleStateBroadcast(2000);
+  return { chat: true, devotee, text: cleanWish };
 }
 
 const giftComboTracker = new Map();
+// Debounce broadcast temple.state để tránh nghẽn WebSocket khi đông người xem / vào phòng liên tục
+let stateBroadcastTimer = null;
+function scheduleStateBroadcast(delayMs = 1200) {
+  if (stateBroadcastTimer) return;
+  stateBroadcastTimer = setTimeout(() => {
+    stateBroadcastTimer = null;
+    broadcastNotification('temple.state', getPublicState());
+  }, delayMs);
+}
+
+const giftComboBuffer = new Map();
+
+
+// Trạng thái tự kết nối lại TikTok Live (khi streamer chưa mở live / mạng rớt)
+let tiktokWanted = false;
+let tiktokReconnectTimer = null;
+let tiktokReconnectAttempts = 0;
+let tiktokSessionId = (process.env.TIKTOK_SESSION_ID || '').trim();
+
+function scheduleTikTokReconnect(reason) {
+  if (!tiktokWanted || tiktokReconnectTimer) return;
+  tiktokReconnectAttempts += 1;
+  // Khi rớt mạng trong lúc live: thử lại siêu tốc sau 2s (3 lần đầu), sau đó nâng dần tránh dồn dập
+  const delay = tiktokReconnectAttempts <= 3
+    ? 2000
+    : Math.min(30000, 4000 * Math.pow(1.3, Math.min(tiktokReconnectAttempts - 3, 5)));
+  console.warn(`[TikTok Live] ${reason} — tự kết nối lại sau ${(delay / 1000).toFixed(1)}s (lần ${tiktokReconnectAttempts})`);
+  tiktokReconnectTimer = setTimeout(() => {
+    tiktokReconnectTimer = null;
+    connectTikTokLive(state.tiktok.username || 'zenfacts_vn', { isRetry: true }).catch(() => {});
+  }, delay);
+}
 
 async function resolveTikTokUsername(rawInput) {
   let input = String(rawInput || '').trim();
@@ -803,7 +1456,10 @@ async function resolveTikTokUsername(rawInput) {
       return directMatch[1];
     }
     try {
-      const resp = await fetch(urlToFetch, { redirect: 'follow' });
+      const resp = await fetch(urlToFetch, {
+        redirect: 'follow',
+        signal: AbortSignal.timeout(8000)
+      });
       const finalUrl = resp.url || '';
       const resolvedMatch = finalUrl.match(/tiktok\.com\/@([^/?#]+)/i);
       if (resolvedMatch && resolvedMatch[1]) {
@@ -830,12 +1486,13 @@ function extractUserFromEvent(data) {
   return { user, uniqueId, avatar };
 }
 
-async function connectTikTokLive(usernameOrUrl) {
+async function connectTikTokLive(usernameOrUrl, opts = {}) {
   const cleanUser = await resolveTikTokUsername(usernameOrUrl);
   if (!cleanUser) {
     throw new Error('Không tìm thấy @username hợp lệ từ dữ liệu nhập vào');
   }
 
+  tiktokWanted = true;
   if (tiktokConn) {
     try {
       await tiktokConn.disconnect();
@@ -843,36 +1500,73 @@ async function connectTikTokLive(usernameOrUrl) {
     tiktokConn = null;
   }
 
+  if (!opts.isRetry) {
+    sessionDevoteesMap.clear();
+  }
+  const prevViewerCount = opts.isRetry ? Number(state.tiktok?.viewerCount || 0) : 0;
   state.tiktok = {
     connected: false,
     connecting: true,
     username: cleanUser,
     roomId: null,
-    viewerCount: 0,
+    viewerCount: prevViewerCount,
     lastError: null
   };
   broadcastNotification('temple.state', getPublicState());
 
-  tiktokConn = new TikTokLiveConnection(cleanUser, {
-    processInitialData: true,
+  if (opts.sessionId !== undefined) {
+    tiktokSessionId = String(opts.sessionId || '').trim();
+  }
+
+  const activeSignApiKey = String(opts.signApiKey || EULER_SIGN_API_KEY || '').trim();
+
+  const connOptions = {
+    // Không phát lại lịch sử chat cũ khi vừa kết nối (tránh nghi thức bị kích hoạt lại)
+    processInitialData: false,
     fetchRoomInfoOnConnect: false,
-    enableExtendedGiftInfo: false
-  });
+    enableExtendedGiftInfo: false,
+    ...(activeSignApiKey ? { signApiKey: activeSignApiKey } : {}),
+    // Giữ nhịp ping chuẩn 10s theo giao thức TikTok Live WebSocket (tránh bị server ngắt sau 5-10 phút)
+    wsConfigOverrides: {
+      DEFAULT_WS_PING_INTERVAL: 10000
+    },
+    wsClientOptions: {
+      handshakeTimeout: 12000,
+      followRedirects: true
+    }
+  };
+
+  // Nếu người dùng cung cấp session ID (cookie sessionid từ trình duyệt)
+  if (tiktokSessionId) {
+    connOptions.session = {
+      cookie: {
+        value: {
+          sessionId: tiktokSessionId,
+          ttTargetIdc: 'useast2a'
+        }
+      }
+    };
+  }
+
+  tiktokConn = new TikTokLiveConnection(cleanUser, connOptions);
 
   tiktokConn.on(ControlEvent.CONNECTED, (roomState) => {
     state.tiktok.connected = true;
     state.tiktok.connecting = false;
     state.tiktok.roomId = roomState?.roomId || tiktokConn?.roomId || null;
     state.tiktok.lastError = null;
+    tiktokReconnectAttempts = 0;
     console.log(`[TikTok Live] Đã kết nối phòng @${cleanUser} (roomId: ${state.tiktok.roomId})`);
     broadcastNotification('temple.state', getPublicState());
   });
 
-  tiktokConn.on(ControlEvent.DISCONNECTED, () => {
+  tiktokConn.on(ControlEvent.DISCONNECTED, (evt) => {
     state.tiktok.connected = false;
     state.tiktok.connecting = false;
-    console.log(`[TikTok Live] Đã ngắt kết nối @${cleanUser}`);
+    const reasonMsg = evt?.reason ? ` (Mã: ${evt?.code || 'N/A'}, Lý do: ${evt.reason})` : '';
+    console.log(`[TikTok Live] Đã ngắt kết nối @${cleanUser}${reasonMsg}`);
     broadcastNotification('temple.state', getPublicState());
+    scheduleTikTokReconnect('Mất kết nối TikTok Live');
   });
 
   tiktokConn.on(ControlEvent.ERROR, (err) => {
@@ -882,42 +1576,156 @@ async function connectTikTokLive(usernameOrUrl) {
   });
 
   tiktokConn.on(WebcastEvent.ROOM_USER, (data) => {
-    const viewerCount = Number(data?.total ?? data?.viewerCount ?? 0);
-    if (viewerCount > 0) {
-      state.tiktok.viewerCount = viewerCount;
-      broadcastNotification('temple.viewerCount', { viewerCount });
-    }
+    const viewerCount = Number(data?.viewerCount ?? data?.total ?? 0);
+    state.tiktok.viewerCount = viewerCount;
+    broadcastNotification('temple.viewerCount', { viewerCount });
   });
+
+  let lastNewcomerTtsDispatch = 0;
+  const sessionNewcomerBowed = new Set();
 
   tiktokConn.on(WebcastEvent.MEMBER, (data) => {
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    recordDevotee(user, uniqueId, avatar, 1, 0, 0, 'Đã vào Chánh Điện lễ Phật');
-    broadcastNotification('temple.state', getPublicState());
+    const cleanUser = sanitizeUserName(user);
+    const userKey = uniqueId || cleanUser;
+
+    // Ghi nhận sự hiện diện vào danh sách phiên live
+    registerSessionDevotee(cleanUser, uniqueId, avatar);
+
+    // Người mới vô Chánh Điện được đi lên bậc thềm lạy Phật 1 lần
+    const now = Date.now();
+    if (userKey && !sessionNewcomerBowed.has(userKey)) {
+      sessionNewcomerBowed.add(userKey);
+      if (sessionNewcomerBowed.size > 1000) {
+        const oldest = sessionNewcomerBowed.values().next().value;
+        sessionNewcomerBowed.delete(oldest);
+      }
+      const canReadTts = (now - lastNewcomerTtsDispatch > 12000);
+      if (canReadTts) lastNewcomerTtsDispatch = now;
+
+      Rituals.newcomerBow({
+        user: cleanUser,
+        uniqueId,
+        avatar,
+        readTts: canReadTts
+      });
+    } else {
+      broadcastNotification('temple.memberJoin', {
+        user: cleanUser,
+        uniqueId,
+        avatar,
+        wish: 'Đã vào Chánh Điện lễ Phật'
+      });
+    }
+    scheduleStateBroadcast(1800);
   });
 
+  const recentChatDedupeMap = new Map();
+  // Throttle cho tin nhắn chat khi phòng đông người (tối đa 4 cmt/giây xử lý hiệu ứng, tránh tràn hàng đợi)
+  let lastChatDispatch = 0;
   tiktokConn.on(WebcastEvent.CHAT, (data) => {
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    const commentText = data?.content || data?.comment || '';
+    const commentText = String(data?.content || data?.comment || '').trim();
+    if (!commentText) return;
+
+    const chatDedupeKey = `${uniqueId || user}_${commentText}`;
+    const now = Date.now();
+    if (recentChatDedupeMap.has(chatDedupeKey) && (now - recentChatDedupeMap.get(chatDedupeKey) < 3000)) {
+      return;
+    }
+    recentChatDedupeMap.set(chatDedupeKey, now);
+    if (recentChatDedupeMap.size > 600) {
+      const oldest = recentChatDedupeMap.keys().next().value;
+      recentChatDedupeMap.delete(oldest);
+    }
+
+    // Giữ nhịp chat mượt mà, không dồn dập
+    if (now - lastChatDispatch < 220) {
+      return;
+    }
+    lastChatDispatch = now;
+
     console.log(`[TikTok Chat] ${user}: ${commentText}`);
     parseViewerComment(commentText, user, uniqueId, avatar);
   });
 
+  // GOM LIKE (Thả Tim): Cho phép người xem thả tim được đi lên lạy Phật,
+  // đồng thời có cơ chế chống spam (mỗi người cách nhau 25s) để nhường lượt cho người khác
+  let pendingLikes = 0;
+  let lastLikeUser = 'Đạo Tràng Phật Tử';
+  let lastLikeUniqueId = '';
+  let lastLikeAvatar = '';
+  let likeBatchTimer = null;
+  const userLikeBowCooldownMap = new Map();
+  let lastLikeTtsDispatch = 0;
+
   tiktokConn.on(WebcastEvent.LIKE, (data) => {
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    const likeCount = Math.min(15, Math.max(1, Number(data?.count ?? data?.likeCount ?? 1)));
-    Rituals.strikeWoodenFish({ user, uniqueId, avatar, count: likeCount });
+    const likeCount = Math.max(1, Number(data?.count ?? data?.likeCount ?? 1));
+    pendingLikes += likeCount;
+    if (user) lastLikeUser = user;
+    if (uniqueId) lastLikeUniqueId = uniqueId;
+    if (avatar) lastLikeAvatar = avatar;
+
+    const cleanUser = sanitizeUserName(user);
+    const userKey = uniqueId || cleanUser;
+    registerSessionDevotee(cleanUser, uniqueId, avatar);
+
+    // Chống spam: Mỗi người thả tim chỉ được kích hoạt đi lên lạy tối đa 1 lần mỗi 25s
+    const now = Date.now();
+    const lastBow = userLikeBowCooldownMap.get(userKey) || 0;
+    if (now - lastBow > 25000) {
+      userLikeBowCooldownMap.set(userKey, now);
+      if (userLikeBowCooldownMap.size > 800) {
+        const oldest = userLikeBowCooldownMap.keys().next().value;
+        userLikeBowCooldownMap.delete(oldest);
+      }
+      const canReadTts = (now - lastLikeTtsDispatch > 12000);
+      if (canReadTts) lastLikeTtsDispatch = now;
+
+      Rituals.likeBow({
+        user: cleanUser,
+        uniqueId,
+        avatar,
+        readTts: false // Không gọi TTS khi thả tim để nhường 100% CPU cho quà tặng và bình luận
+      });
+    }
+
+    if (!likeBatchTimer) {
+      likeBatchTimer = setTimeout(() => {
+        likeBatchTimer = null;
+        if (pendingLikes > 0) {
+          const count = Math.min(20, pendingLikes);
+          pendingLikes = 0;
+          Rituals.strikeWoodenFish({ user: lastLikeUser, uniqueId: lastLikeUniqueId, avatar: lastLikeAvatar, count });
+        }
+      }, 3000);
+    }
   });
 
+  const recentSocialMap = new Map();
   const handleSocialEvent = (data) => {
     const { user, uniqueId, avatar } = extractUserFromEvent(data);
-    Rituals.ringBell({
-      user,
-      uniqueId,
-      avatar,
-      count: 1,
-      wish: 'Hữu duyên tương ngộ nơi cửa Phật, cầu bình an may mắn',
-      readTts: false
+    const key = `${uniqueId || user}_social`;
+    const now = Date.now();
+    if (recentSocialMap.has(key) && (now - recentSocialMap.get(key) < 6000)) {
+      return; // Bỏ qua sự kiện trùng lặp từ cả WebcastEvent.FOLLOW và WebcastEvent.SOCIAL
+    }
+    recentSocialMap.set(key, now);
+    if (recentSocialMap.size > 500) {
+      const oldest = recentSocialMap.keys().next().value;
+      recentSocialMap.delete(oldest);
+    }
+
+    // Ghi nhận công đức khi follow/share nhưng KHÔNG rung chuông để tránh tiếng chuông bị lấn át liên tục
+    const devotee = recordDevotee(user, uniqueId, avatar, 5, 0, 0, 'Kết duyên lành cùng Chùa Online');
+    broadcastNotification('temple.memberJoin', {
+      user: devotee.name,
+      uniqueId: devotee.uniqueId,
+      avatar: devotee.avatar,
+      wish: 'Đã theo dõi / chia sẻ phiên Live'
     });
+    scheduleStateBroadcast(1800);
   };
   tiktokConn.on(WebcastEvent.FOLLOW, handleSocialEvent);
   tiktokConn.on(WebcastEvent.SHARE, handleSocialEvent);
@@ -935,34 +1743,57 @@ async function connectTikTokLive(usernameOrUrl) {
     const giftId = String(data?.giftId || giftObj?.id || 'rose');
     const groupId = String(data?.groupId || `${uniqueId}_${giftId}`);
     const repeatCount = Math.max(1, Number(data?.repeatCount || data?.comboCount || 1));
-
-    const prevCount = giftComboTracker.get(groupId) || 0;
-    if (repeatCount <= prevCount && data?.repeatEnd) {
-      giftComboTracker.delete(groupId);
-      return;
-    }
-    const deltaCount = Math.max(1, repeatCount - prevCount);
-    giftComboTracker.set(groupId, repeatCount);
-    if (giftComboTracker.size > 500) {
-      const firstKey = giftComboTracker.keys().next().value;
-      giftComboTracker.delete(firstKey);
-    }
-
     const diamondCount = Math.max(1, Number(giftObj?.diamondCount || data?.diamondCount || 1));
-    const totalCoins = diamondCount * deltaCount;
     const rawGiftName = giftObj?.name || data?.giftName || giftObj?.describe || 'Hoa Hồng Tâm Thành';
-    const displayGiftName = deltaCount > 1 ? `${deltaCount}x ${rawGiftName}` : rawGiftName;
+    const isRepeatEnd = Boolean(data?.repeatEnd);
 
-    console.log(`[TikTok Gift] ${user} gửi ${displayGiftName} (${totalCoins} xu)`);
+    // Gom combo quà liên tiếp để không bắn trùng lặp hàng chục thông báo TTS / nghi lễ
+    let comboEntry = giftComboBuffer.get(groupId);
+    if (!comboEntry) {
+      comboEntry = {
+        user,
+        uniqueId,
+        avatar,
+        giftName: rawGiftName,
+        diamondCount,
+        maxCount: repeatCount,
+        timer: null
+      };
+      giftComboBuffer.set(groupId, comboEntry);
+    } else {
+      comboEntry.maxCount = Math.max(comboEntry.maxCount, repeatCount);
+      if (comboEntry.timer) {
+        clearTimeout(comboEntry.timer);
+        comboEntry.timer = null;
+      }
+    }
 
-    Rituals.offerGift({
-      user,
-      uniqueId,
-      avatar,
-      coins: totalCoins,
-      giftName: displayGiftName,
-      wish: `Thành tâm dâng ${displayGiftName} kính lễ Đức Phật A Di Đà`
-    });
+    const flushCombo = () => {
+      giftComboBuffer.delete(groupId);
+      const totalCount = comboEntry.maxCount;
+      const totalCoins = comboEntry.diamondCount * totalCount;
+      const displayGiftName = totalCount > 1 ? `${totalCount}x ${comboEntry.giftName}` : comboEntry.giftName;
+
+      console.log(`[TikTok Gift Consolidated] ${comboEntry.user} dâng ${displayGiftName} (${totalCoins} xu)`);
+
+      // LUÔN đọc TTS cảm tạ xưng danh người xem khi tặng hoa / quà (kể cả hoa 1 xu)
+      Rituals.offerGift({
+        user: comboEntry.user,
+        uniqueId: comboEntry.uniqueId,
+        avatar: comboEntry.avatar,
+        coins: totalCoins,
+        giftName: displayGiftName,
+        readTts: true,
+        wish: `Thành tâm dâng cúng ${displayGiftName} kính lễ Đức Phật A Di Đà`
+      });
+    };
+
+    if (isRepeatEnd) {
+      flushCombo();
+    } else {
+      // Đợi 280ms sau gói quà cuối cùng để gửi tổng kết nhanh chóng, không gây trễ
+      comboEntry.timer = setTimeout(flushCombo, 280);
+    }
   });
 
   try {
@@ -970,18 +1801,36 @@ async function connectTikTokLive(usernameOrUrl) {
     state.tiktok.connected = true;
     state.tiktok.connecting = false;
     state.tiktok.roomId = roomState?.roomId || tiktokConn?.roomId || null;
+    tiktokReconnectAttempts = 0;
     broadcastNotification('temple.state', getPublicState());
     return state.tiktok;
   } catch (err) {
     state.tiktok.connected = false;
     state.tiktok.connecting = false;
-    state.tiktok.lastError = err?.message || 'Không thể kết nối phòng Live (kiểm tra tài khoản đang phát Live chưa)';
+    let friendlyError = err?.message || 'Không thể kết nối phòng Live';
+    if (friendlyError.includes('rate_limit_account_day') || friendlyError.includes('Rate Limited') || friendlyError.includes('eulerstream')) {
+      friendlyError = 'IP của bạn đã chạm hạn mức miễn phí của Sign Server trong ngày. Vui lòng lấy Free API Key tại eulerstream.com hoặc nhập TikTok sessionid.';
+    } else if (friendlyError.includes('LIVE has ended') || friendlyError.includes('UserOfflineError') || friendlyError.includes('offline')) {
+      friendlyError = `Phòng Live @${cleanUser} hiện đang không phát trực tiếp hoặc đã kết thúc.`;
+    }
+    state.tiktok.lastError = friendlyError;
     broadcastNotification('temple.state', getPublicState());
+    if (opts.isRetry) {
+      scheduleTikTokReconnect(`Chưa kết nối được @${cleanUser}`);
+      return state.tiktok;
+    }
+    scheduleTikTokReconnect(`Chưa kết nối được @${cleanUser}`);
     throw new Error(state.tiktok.lastError);
   }
 }
 
 function disconnectTikTokLive() {
+  tiktokWanted = false;
+  tiktokReconnectAttempts = 0;
+  if (tiktokReconnectTimer) {
+    clearTimeout(tiktokReconnectTimer);
+    tiktokReconnectTimer = null;
+  }
   if (tiktokConn) {
     try {
       tiktokConn.disconnect();
@@ -991,6 +1840,7 @@ function disconnectTikTokLive() {
   state.tiktok.connected = false;
   state.tiktok.connecting = false;
   state.tiktok.viewerCount = 0;
+  sessionDevoteesMap.clear();
   broadcastNotification('temple.state', getPublicState());
   return state.tiktok;
 }
@@ -999,25 +1849,85 @@ function disconnectTikTokLive() {
 // 6. AUTO-SIMULATION ENGINE (CHẾ ĐỘ TỰ ĐỘNG GIẢ LẬP ĐÔNG NGƯỜI XEM)
 // ============================================================================
 let autoSimTimer = null;
-const SIM_DEVOTEES = [
-  { user: 'Ngọc Anh Nguyễn', uniqueId: 'ngocanh.98', wish: 'Con thành tâm cầu cho bố mẹ luôn mạnh khỏe, bình an' },
-  { user: 'Trần Minh Quân', uniqueId: 'minhquan_bds', wish: 'Cầu tháng mới công việc thuận buồm xuôi gió, tài lộc hanh thông' },
-  { user: 'Diệu Thảo Tâm An', uniqueId: 'tam_an_99', wish: 'Nam Mô A Di Đà Phật, nguyện cầu thế giới hòa bình chúng sinh an lạc' },
-  { user: 'Lê Hoàng Nam', uniqueId: 'hoangnam.dev', wish: 'Cầu thi cử đỗ đạt điểm cao, sự nghiệp rộng mở' },
-  { user: 'Phạm Thanh Hà', uniqueId: 'thanhha.lotus', wish: 'Cầu gia đạo êm ấm, con cái ngoan ngoãn học giỏi' },
-  { user: 'Vũ Đức Thịnh', uniqueId: 'ducthinh88', wish: 'Con xin gieo một quẻ cầu tài lộc đầu năm' }
+const SIM_NAMES = [
+  'Ngọc Anh Nguyễn', 'Trần Minh Quân', 'Diệu Thảo Tâm An', 'Lê Hoàng Nam', 'Phạm Thanh Hà',
+  'Vũ Đức Thịnh', 'Đại Thí Chủ Minh Tâm', 'Phật Tử Diệu Âm', 'Tuệ Minh Cư Sĩ', 'Thanh Trúc Thiện Duyên',
+  'Đức Trọng Tâm Lành', 'Nguyên An Tịnh Độ', 'Bảo Trâm Cầu An', 'Hoàng Bách Phát Tâm', 'Mỹ Duyên Phúc Lộc',
+  'Vĩnh Khang Tùy Hỷ', 'Hương Giang Cát Tường', 'Khánh Toàn Thiện Duyên', 'Quang Minh Chánh Niệm', 'Diệu Hạnh Tâm Từ',
+  'Phúc Lâm Đại Hỷ', 'Thảo Vy Tinh Tấn', 'Minh Triết Huệ Đăng', 'Thiện Nhân Tích Phước', 'Tâm Đức Hoan Hỷ',
+  'Hồng Phúc Bình An', 'Thành Đạt Phước Lành', 'Thanh Tùng An Lạc', 'Kim Ngân Vạn Hạnh', 'Bích Thủy Bồ Đề',
+  'Trí Dũng Tấn Tới', 'Bảo Long Thuận Buồm', 'Phương Thảo Hạnh Phúc', 'Đăng Khoa Đỗ Đạt', 'Hữu Phước Viên Mãn'
 ];
 
+const SIM_WISHES = [
+  'Con thành tâm cầu cho cha mẹ luôn mạnh khỏe bình an, sống lâu trăm tuổi',
+  'Cầu tháng mới công việc thuận buồm xuôi gió, tài lộc hanh thông buôn may bán đắt',
+  'Nam Mô A Di Đà Phật, nguyện cầu thế giới hòa bình chúng sinh an lạc',
+  'Cầu thi cử đỗ đạt điểm cao, học hành tấn tới, sự nghiệp rộng mở',
+  'Cầu gia đạo êm ấm trong ngoài hòa thuận, con cái ngoan ngoãn mạnh giỏi',
+  'Con xin gieo một quẻ cầu tài lộc, gia đạo bình an cát tường',
+  'Cầu sức khỏe cho cả gia đình, tai qua nạn khỏi, gặp hung hóa cát',
+  'Thành tâm dâng hương bái Phật, sám hối nghiệp chướng, tâm hồn thanh tịnh',
+  'Cầu cho người thân đang đau ốm sớm ngày bình phục, tai ách tiêu trừ',
+  'Cầu công việc làm ăn ngày càng phát đạt, gặp nhiều quý nhân nâng đỡ',
+  'Nam mô Quán Thế Âm Bồ Tát từ bi gia hộ độ trì cho gia đình vạn sự cát tường',
+  'Cầu duyên lành hội tụ, gia đình sum vầy hạnh phúc an khang',
+  'Tâm thành kính lễ mười phương chư Phật, tích lũy công đức phúc báo',
+  'Cầu cho con cháu hiếu thảo, gia tộc hưng long thịnh vượng',
+  'Cầu buôn bán thuận lợi, tiền vào như nước, vạn sự hanh thông như ý',
+  'Cầu cho việc kinh doanh cửa hàng ngày càng đông khách, mua may bán đắt',
+  'Cầu mong tâm an định tĩnh, sáng suốt hanh thông trong mọi việc',
+  'Cầu cho vợ chồng hòa thuận, gia đình hạnh phúc, trăm năm êm ấm',
+  'Cầu cho các con chăm ngoan học giỏi, thi cử đỗ đạt thành tài',
+  'Con xin sám hối mọi lỗi lầm, phát nguyện sống lương thiện tích đức',
+  'Cầu bình an cho người thân đi đường xa luôn được vạn dặm bình an',
+  'Cầu chúc cho toàn thể đạo tràng luôn tràn đầy hỷ lạc, phúc thọ dồi dào',
+  'Cầu tài lộc hanh thông, công thành danh toại, phúc lộc song toàn',
+  'Cầu cho cha mẹ kính yêu sức khỏe dồi dào, an yên thanh nhàn',
+  'Cầu nguyện cửu huyền thất tổ siêu sinh tịnh độ, gia đạo hưng long'
+];
+
+const recentSimNameHistory = [];
+const recentSimWishHistory = [];
+
+function getNextSimDevotee() {
+  const availableNames = SIM_NAMES.filter(n => !recentSimNameHistory.includes(n));
+  const namePool = availableNames.length > 0 ? availableNames : SIM_NAMES;
+  const name = namePool[Math.floor(Math.random() * namePool.length)];
+  recentSimNameHistory.push(name);
+  if (recentSimNameHistory.length > 18) recentSimNameHistory.shift();
+
+  const availableWishes = SIM_WISHES.filter(w => !recentSimWishHistory.includes(w));
+  const wishPool = availableWishes.length > 0 ? availableWishes : SIM_WISHES;
+  const wish = wishPool[Math.floor(Math.random() * wishPool.length)];
+  recentSimWishHistory.push(wish);
+  if (recentSimWishHistory.length > 10) recentSimWishHistory.shift();
+
+  const uniqueId = toAsciiLower(name).replace(/[^a-z0-9]/g, '_');
+  return { user: name, uniqueId, wish };
+}
+
 function runSingleSimulationStep() {
-  const pick = SIM_DEVOTEES[Math.floor(Math.random() * SIM_DEVOTEES.length)];
+  const pick = getNextSimDevotee();
   const roll = Math.random();
+  // 30% xác suất xuất hiện làn sóng dâng hương đồng thời (2 đến 5 người)
   if (roll < 0.30) {
+    const waveCount = 2 + Math.floor(Math.random() * 4); // 2, 3, 4 hoặc 5 người
+    for (let w = 0; w < waveCount; w++) {
+      setTimeout(() => {
+        const d = getNextSimDevotee();
+        Rituals.burnIncense({ user: d.user, uniqueId: d.uniqueId, count: 3, wish: d.wish });
+      }, w * 280);
+    }
+    return;
+  }
+  if (roll < 0.60) {
     Rituals.burnIncense({ user: pick.user, uniqueId: pick.uniqueId, count: 3, wish: pick.wish });
-  } else if (roll < 0.55) {
-    Rituals.sendPrayer({ user: pick.user, uniqueId: pick.uniqueId, wish: pick.wish });
   } else if (roll < 0.75) {
+    Rituals.sendPrayer({ user: pick.user, uniqueId: pick.uniqueId, wish: pick.wish });
+  } else if (roll < 0.88) {
     Rituals.drawFortune({ user: pick.user, uniqueId: pick.uniqueId, topic: pick.wish });
-  } else if (roll < 0.90) {
+  } else if (roll < 0.95) {
     Rituals.offerGift({ user: pick.user, uniqueId: pick.uniqueId, giftType: 'lotus', coins: 15, giftName: 'Hoa Sen Vàng Tinh Khiết' });
   } else {
     Rituals.ringBell({ user: pick.user, uniqueId: pick.uniqueId, count: 1, wish: pick.wish, readTts: true });
@@ -1032,7 +1942,7 @@ function configureAutoSim(enabled) {
   }
   if (state.settings.autoSim) {
     runSingleSimulationStep();
-    autoSimTimer = setInterval(runSingleSimulationStep, state.settings.autoSimIntervalMs || 9500);
+    autoSimTimer = setInterval(runSingleSimulationStep, state.settings.autoSimIntervalMs || 6500);
   }
 }
 
@@ -1043,6 +1953,21 @@ async function handleRpcCall(method, params = {}) {
   switch (method) {
     case 'temple.getState':
       return getPublicState();
+    case 'temple.simulateWave': {
+      const count = Math.min(7, Math.max(1, parseInt(params.count || 7, 10)));
+      const results = [];
+      for (let i = 0; i < count; i++) {
+        const d = getNextSimDevotee();
+        const res = Rituals.burnIncense({
+          user: d.user,
+          uniqueId: d.uniqueId,
+          count: 3,
+          wish: d.wish
+        });
+        results.push(res);
+      }
+      return { success: true, count, results };
+    }
     case 'temple.burnIncense':
       return Rituals.burnIncense(params);
     case 'temple.strikeWoodenFish':
@@ -1053,10 +1978,17 @@ async function handleRpcCall(method, params = {}) {
       return Rituals.sendPrayer(params);
     case 'temple.offerGift':
       return Rituals.offerGift(params);
+    case 'temple.likeBow':
+      return Rituals.likeBow(params);
+    case 'temple.newcomerBow':
+      return Rituals.newcomerBow(params);
     case 'temple.drawFortune':
       return Rituals.drawFortune(params);
     case 'temple.grandCeremony':
       return Rituals.grandCeremony(params);
+    case 'temple.adminNotice':
+    case 'admin.announce':
+      return Rituals.adminNotice(params);
     case 'temple.updateSettings':
       return Rituals.updateSettings(params);
     case 'temple.resetMerit':
@@ -1064,7 +1996,8 @@ async function handleRpcCall(method, params = {}) {
     case 'temple.comment':
       return parseViewerComment(params.comment, params.user, params.uniqueId, params.avatar);
     case 'temple.speak': {
-      const res = await zeroTts.synthesize(params.text, params.voice || 'maichi');
+      const priority = params.priority != null ? Number(params.priority) : 0;
+      const res = await zeroTts.synthesize(params.text, params.voice || state.settings.ttsVoice || DEFAULT_TTS_VOICE, priority);
       if (res.ok && params.broadcast !== false) {
         broadcastNotification('tts.play', {
           text: params.text,
@@ -1077,7 +2010,10 @@ async function handleRpcCall(method, params = {}) {
     case 'temple.ttsStatus':
       return zeroTts.getStatus();
     case 'live.connect':
-      return await connectTikTokLive(params.username);
+      return await connectTikTokLive(params.username, {
+        sessionId: params.sessionId,
+        signApiKey: params.signApiKey
+      });
     case 'live.disconnect':
       return disconnectTikTokLive();
     case 'live.setAutoSim':
@@ -1099,12 +2035,30 @@ app.use(express.json({ limit: '2mb' }));
 app.use('/tts-cache', express.static(TTS_CACHE_DIR, { maxAge: '7d' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+function requestToken(req) {
+  const header = req.headers['x-rpc-token'] || req.headers.authorization || '';
+  if (typeof header === 'string' && header.toLowerCase().startsWith('bearer ')) {
+    return header.slice(7).trim();
+  }
+  return String(header || req.query?.token || '').trim();
+}
+
+function requireAuth(req, res, next) {
+  if (!RPC_TOKEN) return next();
+  if (requestToken(req) === RPC_TOKEN) return next();
+  return res.status(401).json({
+    jsonrpc: '2.0',
+    id: req.body?.id ?? null,
+    error: { code: -32001, message: 'Unauthorized: thiếu hoặc sai RPC token' }
+  });
+}
+
 app.get('/admin', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
 // HTTP JSON-RPC 2.0 Endpoint
-app.post('/rpc', async (req, res) => {
+app.post('/rpc', requireAuth, async (req, res) => {
   const { jsonrpc, id, method, params } = req.body || {};
   if (!method) {
     return res.status(400).json({
@@ -1129,15 +2083,45 @@ app.post('/rpc', async (req, res) => {
   }
 });
 
-// ZeroTTS HTTP Endpoint (Mai Chi default)
-app.all('/api/tts', async (req, res) => {
-  const text = (req.body?.text || req.query?.text || '').trim();
-  const voice = (req.body?.voice || req.query?.voice || state.settings.ttsVoice || 'maichi').trim();
+// ZeroTTS HTTP Endpoint (giọng nam trầm ấm mặc định)
+app.all('/api/tts', requireAuth, async (req, res) => {
+  const text = String(req.body?.text || req.query?.text || '').trim();
+  const voice = String(req.body?.voice || req.query?.voice || state.settings.ttsVoice || DEFAULT_TTS_VOICE).trim().toLowerCase();
+  const priority = req.body?.priority != null ? Number(req.body.priority) : (req.query?.priority != null ? Number(req.query.priority) : 1);
   if (!text) {
     return res.status(400).json({ ok: false, error: 'Thiếu nội dung text cần đọc' });
   }
-  const result = await zeroTts.synthesize(text, voice);
+  const result = await zeroTts.synthesize(text, voice, priority);
   res.json(result);
+});
+
+app.get('/api/voices', (_req, res) => {
+  res.json({
+    default: state.settings.ttsVoice || DEFAULT_TTS_VOICE,
+    maleVoices: zeroTts.getStatus().maleVoices,
+    voices: zeroTts.getStatus().voiceDetails,
+    ready: zeroTts.ready,
+    status: zeroTts.status
+  });
+});
+
+// Cho client biết file nhạc nền tuỳ chọn có tồn tại hay không (tránh request 404)
+app.get('/api/bg-music', (_req, res) => {
+  const candidateFiles = [
+    'bg_chant.m4a',
+    'bg_chant.mp3',
+    'bg_music.mp3',
+    'bg_music.m4a',
+    'bg_chant.wav',
+    'nhac_thien.mp3'
+  ];
+  for (const filename of candidateFiles) {
+    const filePath = path.join(__dirname, 'public', 'assets', filename);
+    if (fs.existsSync(filePath)) {
+      return res.json({ available: true, url: `/assets/${filename}` });
+    }
+  }
+  res.json({ available: false, url: null });
 });
 
 app.get('/api/state', (_req, res) => {
@@ -1160,7 +2144,27 @@ function broadcastNotification(method, params) {
   }
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  if (RPC_TOKEN) {
+    let token = '';
+    try {
+      token = new URL(req.url || '/ws', 'http://localhost').searchParams.get('token') || '';
+    } catch (_) {}
+    if (!token) token = String(req.headers['x-rpc-token'] || '').trim();
+    if (token !== RPC_TOKEN) {
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'error',
+        params: { error: 'Unauthorized: thiếu hoặc sai RPC token' }
+      }));
+      ws.close(1008, 'Unauthorized');
+      return;
+    }
+  }
+
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   ws.send(
     JSON.stringify({
       jsonrpc: '2.0',
@@ -1202,18 +2206,60 @@ wss.on('connection', (ws) => {
   });
 });
 
+// Dọn các WebSocket "zombie" (đóng tab, mất mạng) để không giữ kết nối vô hạn
+const wsHeartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch (_) {}
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (_) {}
+  }
+}, 30000);
+wss.on('close', () => clearInterval(wsHeartbeat));
+
 const zeroTts = new ZeroTTSManager();
 
-server.listen(PORT, () => {
+function shutdown(signal) {
+  console.log(`\n[Server] Nhận ${signal}, đang tắt an toàn...`);
+  clearInterval(wsHeartbeat);
+  tiktokWanted = false;
+  if (tiktokReconnectTimer) {
+    clearTimeout(tiktokReconnectTimer);
+    tiktokReconnectTimer = null;
+  }
+  try {
+    if (tiktokConn) tiktokConn.disconnect();
+  } catch (_) {}
+  zeroTts.stop();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('unhandledRejection', (err) => {
+  console.error('[Unhandled Rejection]', err?.message || err);
+});
+
+server.listen(PORT, HOST, () => {
   console.log(`============================================================`);
   console.log(`🪷 CHÙA ONLINE TIKTOK LIVE RPC ĐÃ KHỞI ĐỘNG`);
   console.log(`📺 Màn hình Live (9:16 OBS): http://localhost:${PORT}`);
   console.log(`🎛️ Bảng điều khiển RPC Admin: http://localhost:${PORT}/admin`);
   console.log(`🔌 JSON-RPC 2.0 Endpoint   : http://localhost:${PORT}/rpc (ws://localhost:${PORT}/ws)`);
+  console.log(`🎙️ Giọng đọc mặc định      : ${DEFAULT_TTS_VOICE} (nam trầm ấm)`);
+  if (RPC_TOKEN) console.log(`🔒 RPC token               : ĐANG BẬT (header x-rpc-token)`);
   console.log(`============================================================`);
 
-  // Tự động kết nối tới @zenfacts_vn ngay khi khởi động server
-  const defaultChannel = process.env.TIKTOK_USER || state.tiktok?.username || 'zenfacts_vn';
+  // Tự động bật Auto-Sim nếu được cấu hình trong settings
+  if (state.settings?.autoSim) {
+    console.log('[Auto-Sim] Tự động Giả lập Người xem: ĐANG BẬT');
+    configureAutoSim(true);
+  }
+
+  // Tự động kết nối kênh TikTok Live nếu có cấu hình TIKTOK_USER
+  const defaultChannel = process.env.TIKTOK_USER || '';
   if (defaultChannel) {
     connectTikTokLive(defaultChannel).catch((err) => {
       console.warn(`[Auto-Connect @${defaultChannel}] Chưa kết nối được ngay:`, err.message);

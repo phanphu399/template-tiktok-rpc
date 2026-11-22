@@ -33,14 +33,33 @@ html, body {
   padding: 12px;
 }
 
+html.obs-mode,
+html.obs-mode body,
 body.obs-mode {
-  background: transparent;
+  background: #120403 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  -webkit-font-smoothing: antialiased !important;
+  -moz-osx-font-smoothing: grayscale !important;
+  text-rendering: optimizeLegibility !important;
 }
+html.obs-mode .app-workspace,
 body.obs-mode .app-workspace {
-  padding: 0;
-  gap: 0;
+  width: 100vw !important;
+  height: 100vh !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  gap: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
+html.obs-mode .quick-dock,
 body.obs-mode .quick-dock {
+  flex-shrink: 0;
   display: none !important;
 }
 
@@ -48,6 +67,7 @@ body.obs-mode .quick-dock {
    KHUNG 9:16 CHUẨN TIKTOK LIVE (1080 x 1920 LOGICAL) — TỐI ƯU HÓA GPU COMPOSITOR
    ========================================================================== */
 .stage-wrapper {
+  flex-shrink: 0;
   position: relative;
   height: 96vh;
   aspect-ratio: 9 / 16;
@@ -58,10 +78,16 @@ body.obs-mode .quick-dock {
   contain: layout paint style;
 }
 
+html.obs-mode .stage-wrapper,
 body.obs-mode .stage-wrapper {
-  height: 100vh;
-  border-radius: 0;
-  border: none;
+  height: 100vh !important;
+  width: min(100vw, calc(100vh * (9 / 16))) !important;
+  aspect-ratio: 9 / 16 !important;
+  margin: 0 auto !important;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  background: #120403 !important;
 }
 
 .stage-9x16 {
@@ -76,6 +102,17 @@ body.obs-mode .stage-wrapper {
   contain: strict;
 }
 
+/* 0. CAMERA RIG 2.5D — LIA THEO PHẬT TỬ DÂNG HƯƠNG LÊN BÀN THỜ */
+/* Cố định toàn cảnh Chánh Điện trang nghiêm (Không zoom, không lia cam) */
+.camera-rig {
+  position: absolute;
+  inset: 0;
+  width: 1080px;
+  height: 1920px;
+  transform: none !important;
+  transition: none !important;
+}
+
 /* 1. HÌNH NỀN CHÁNH ĐIỆN ĐỨC PHẬT A DI ĐÀ SẮC NÉT TUYỆT ĐỐI */
 .sanctuary-bg-img {
   position: absolute;
@@ -86,6 +123,11 @@ body.obs-mode .stage-wrapper {
   object-position: center top;
   z-index: 1;
   pointer-events: none;
+  /* Ảnh nền là ảnh thật 1080x1920: để Chromium nội suy mượt (auto),
+     không dùng crisp-edges vì sẽ làm ảnh bị rỗ/pixel khi co giãn. */
+  image-rendering: auto;
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 /* 1B. HỆ THỐNG HÀO QUANG ĐỨC PHẬT A DI ĐÀ — TỐI ƯU HÓA CPU (KHÔNG DÙNG FILTER:BLUR) */
@@ -328,25 +370,59 @@ body.obs-mode .stage-wrapper {
   pointer-events: none;
 }
 
+/* Thân nén nhang trầm hương thật: thanh mảnh 2.4px, chân đỏ tía, thân bột trầm sẫm, tàn xám ở đỉnh */
 .incense-stick {
   position: absolute;
   bottom: 0;
-  width: 3.5px;
-  height: 82px;
-  background: linear-gradient(180deg, #e0d6cc 0%, #d4a359 35%, #8c1d18 80%);
-  border-radius: 2px;
+  width: 2.4px;
+  border-radius: 1px;
   transform-origin: bottom center;
+  background: linear-gradient(
+    180deg,
+    #9e978e 0%,
+    #857e75 6px,
+    #4a2e18 10px,
+    #663d20 35%,
+    #502f18 65%,
+    #8b1818 88%,
+    #a81e1e 100%
+  );
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
+/* Đốm tàn đỏ cháy âm ỉ thật: tâm sáng rực, hào quang đỏ cam, không viền hoạt hình */
 .incense-ember {
   position: absolute;
-  top: -4px;
-  left: -2px;
-  width: 7px;
-  height: 7px;
+  top: -3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 3.8px;
+  height: 3.8px;
   border-radius: 50%;
-  background: #ff6d00;
-  border: 1.5px solid #ffe082;
+  background: radial-gradient(circle, #fffbe6 20%, #ff8f00 55%, #d82b00 100%);
+  box-shadow:
+    0 0 3px 1px #ff6d00,
+    0 0 7px 2px rgba(255, 69, 0, 0.75),
+    0 0 12px 3px rgba(255, 171, 0, 0.35);
+  animation: emberBreathe 2.4s infinite alternate ease-in-out;
+}
+
+@keyframes emberBreathe {
+  0% {
+    opacity: 0.82;
+    transform: translateX(-50%) scale(0.92);
+    box-shadow: 0 0 3px 1px #ff6d00, 0 0 6px 1px rgba(255, 69, 0, 0.6);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(-50%) scale(1.12);
+    box-shadow: 0 0 4px 1.5px #ffab00, 0 0 9px 2.5px rgba(255, 69, 0, 0.9), 0 0 14px 4px rgba(255, 193, 7, 0.45);
+  }
+  100% {
+    opacity: 0.78;
+    transform: translateX(-50%) scale(0.88);
+    box-shadow: 0 0 2.5px 1px #e65100, 0 0 5px 1px rgba(216, 43, 0, 0.55);
+  }
 }
 
 /* Nút Pháp Khí Tương Tác Nhanh Trên Bàn Thờ */
@@ -385,20 +461,14 @@ body.obs-mode .stage-wrapper {
   display: block;
   object-fit: contain;
   transform-origin: bottom center;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+  transform: translateZ(0);
 }
 
-/* Chủ lễ đang hành lễ ngay chính giữa trước lư hương đồng */
+/* 4. CHỦ LỄ QUỲ LẠY TRANG NGHIÊM Ở ĐẦU THẢM ĐỎ TRƯỚC BẬC THỀM (TOP=1110px, CHÂN CHẠM ĐẦU THẢM y=1325px) */
 .central-worshipper {
-  position: absolute;
-  left: 540px;
-  top: 970px;
-  transform: translate3d(-50%, 0, 0);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  z-index: 14;
-  pointer-events: none;
-  will-change: transform;
+  display: none !important;
 }
 
 .central-worshipper.walking-up {
@@ -407,7 +477,7 @@ body.obs-mode .stage-wrapper {
 
 @keyframes centralWalkUpCarpet {
   0% {
-    transform: translate3d(-50%, 490px, 0) scale(1.06);
+    transform: translate3d(-50%, 360px, 0) scale(1.05);
   }
   100% {
     transform: translate3d(-50%, 0px, 0) scale(1);
@@ -442,52 +512,54 @@ body.obs-mode .stage-wrapper {
 }
 
 .worshipper-wish-bubble {
-  max-width: 340px;
-  padding: 6px 14px;
-  margin-bottom: 4px;
-  border-radius: 14px;
-  background: rgba(18, 4, 3, 0.92);
-  border: 1.5px solid var(--gold-main);
+  max-width: 400px;
+  padding: 8px 18px;
+  margin-bottom: 6px;
+  border-radius: 16px;
+  background: rgba(18, 4, 3, 0.95);
+  border: 1.8px solid var(--gold-main);
   color: var(--gold-bright);
-  font-size: 14.5px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 700;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.9);
 }
 
 /* Thẻ tên thí chủ chuẩn phong cách Game Live */
 .name-tag {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 12px 4px 5px;
+  gap: 9px;
+  padding: 5px 16px 5px 8px;
   border-radius: 999px;
-  background: rgba(16, 6, 4, 0.94);
-  border: 1.5px solid var(--gold-main);
+  background: rgba(8, 3, 2, 0.96);
+  border: 2px solid var(--gold-main);
   margin-top: -12px;
   position: relative;
   z-index: 2;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.95);
 }
 
 .central-name-tag {
-  padding: 5px 15px 5px 6px;
-  border-width: 2px;
+  padding: 8px 20px 8px 9px;
+  border-width: 2.5px;
   border-color: var(--gold-bright);
 }
 
 .tag-avatar {
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  border: 1.5px solid var(--gold-bright);
+  border: 2.2px solid var(--gold-bright);
   background: #4f100a;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
-  font-weight: 800;
+  font-size: 20px;
+  font-weight: 900;
   color: var(--gold-bright);
   overflow: hidden;
   flex-shrink: 0;
@@ -504,75 +576,22 @@ body.obs-mode .stage-wrapper {
   line-height: 1.15;
 }
 .tag-name {
-  font-size: 14.5px;
-  font-weight: 800;
+  font-size: 25px;
+  font-weight: 900;
   color: #ffffff;
-  max-width: 135px;
+  max-width: 260px;
+  letter-spacing: 0.4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-shadow: 0 2px 4px #000, 0 3px 8px #000, 0 0 14px rgba(0, 0, 0, 1);
 }
 .tag-sub {
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 800;
   color: var(--gold-bright);
 }
 
-/* 5. HÀNG 6 ĐỆM QUỲ VIP TRÊN BỤC GỖ (STATIC LAYER, 0% CPU KHI ĐỨNG YÊN) */
-.vip-cushions-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 12;
-  pointer-events: none;
-  contain: layout style;
-}
-
-.vip-devotee-slot {
-  position: absolute;
-  transform: translate3d(-50%, -100%, 0);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.vip-devotee-slot .devotee-sprite {
-  width: 102px;
-  height: 132px;
-}
-
-.vip-rank-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px 3px 4px;
-  border-radius: 999px;
-  background: rgba(14, 5, 4, 0.94);
-  border: 1.5px solid var(--gold-main);
-  margin-top: -10px;
-  white-space: nowrap;
-}
-
-.vip-rank-num {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #e6ac35;
-  color: #1b0503;
-  font-size: 12px;
-  font-weight: 900;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.vip-rank-name {
-  font-size: 13px;
-  font-weight: 800;
-  color: #fff;
-  max-width: 92px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 /* 6. ĐẠO TRÀNG NGƯỜI XEM QUỲ LỄ HAI BÊN THẢM ĐỎ (40 CHỖ NGỒI TĨNH SIÊU NHẸ CPU) */
 .congregation-hall {
@@ -581,6 +600,13 @@ body.obs-mode .stage-wrapper {
   z-index: 11;
   pointer-events: none;
   contain: layout style;
+}
+
+.abbot-monk-zone {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 13;
 }
 
 .hall-seat {
@@ -598,28 +624,31 @@ body.obs-mode .stage-wrapper {
 .seat-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 8px 2px 3px;
+  gap: 8px;
+  padding: 5px 14px 5px 6px;
   border-radius: 999px;
-  background: rgba(12, 4, 3, 0.92);
-  border: 1px solid rgba(244, 193, 80, 0.68);
-  margin-top: -12px;
+  background: rgba(14, 5, 4, 0.96);
+  border: 2.2px solid #ffd54f;
+  margin-bottom: 2px;
   white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.95), 0 0 12px rgba(255, 213, 79, 0.6);
+  z-index: 5;
 }
 
 .seat-avatar {
-  width: 19px;
-  height: 19px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   background: #6b150e;
-  border: 1px solid var(--gold-bright);
-  color: var(--gold-bright);
-  font-size: 10px;
-  font-weight: 800;
+  border: 2px solid #ffe082;
+  color: #ffe082;
+  font-size: 16px;
+  font-weight: 900;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  flex-shrink: 0;
 }
 .seat-avatar img {
   width: 100%;
@@ -628,10 +657,12 @@ body.obs-mode .stage-wrapper {
 }
 
 .seat-username {
-  font-size: 11.5px;
-  font-weight: 700;
-  color: #fff6e5;
-  max-width: 78px;
+  font-size: 24px;
+  font-weight: 900;
+  color: #ffffff;
+  letter-spacing: 0.4px;
+  text-shadow: 0 2px 4px #000, 0 3px 8px #000, 0 0 14px rgba(0, 0, 0, 1);
+  max-width: 250px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -745,13 +776,13 @@ body.obs-mode .stage-wrapper {
 .bottom-hud-bar {
   position: absolute;
   bottom: 20px;
-  left: 24px;
-  right: 24px;
-  height: 192px;
+  left: 20px;
+  right: 20px;
+  height: 224px;
   z-index: 20;
   display: grid;
-  grid-template-columns: 1.65fr 1fr;
-  gap: 16px;
+  grid-template-columns: 1.85fr 1fr;
+  gap: 14px;
 }
 
 .hud-left-col {
@@ -762,82 +793,108 @@ body.obs-mode .stage-wrapper {
 }
 
 .hud-active-notice {
-  height: 52px;
+  height: 56px;
   padding: 0 18px;
   border-radius: 14px;
-  background: rgba(34, 10, 6, 0.94);
-  border: 1.5px solid rgba(244, 193, 80, 0.65);
+  background: rgba(30, 8, 5, 0.96);
+  border: 2px solid rgba(244, 193, 80, 0.8);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  font-size: 19px;
+  gap: 12px;
+  font-size: 22px;
+  font-weight: 800;
   color: var(--gold-bright);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
 }
 
 .hud-gift-cards {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
 }
 
 .hud-gift-card {
   cursor: pointer;
-  background: rgba(24, 8, 5, 0.94);
-  border: 1.5px solid rgba(244, 193, 80, 0.55);
+  background: linear-gradient(180deg, rgba(34, 10, 6, 0.96) 0%, rgba(18, 5, 3, 0.98) 100%);
+  border: 2px solid rgba(244, 193, 80, 0.65);
   border-radius: 14px;
-  padding: 10px 12px;
+  padding: 8px 6px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  align-items: center;
+  text-align: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.8);
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.hud-gift-card:hover {
+.hud-gift-card:hover, .hud-gift-card:active {
+  transform: translateY(-2px) scale(1.02);
   border-color: var(--gold-bright);
+  box-shadow: 0 6px 18px rgba(255, 215, 0, 0.4);
 }
 .gift-coin-tag {
-  font-size: 13px;
-  font-weight: 800;
-  color: var(--muted-gold);
-  letter-spacing: 0.5px;
+  font-size: 14px;
+  font-weight: 900;
+  color: #ffe082;
+  background: rgba(140, 24, 18, 0.9);
+  border: 1px solid rgba(255, 215, 0, 0.45);
+  border-radius: 6px;
+  padding: 3px 5px;
+  letter-spacing: 0.4px;
+  width: 100%;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
 }
 .gift-card-body {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 4px;
+  flex: 1;
 }
 .gift-emoji {
-  font-size: 34px;
+  font-size: 32px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8));
 }
 .gift-title {
-  font-size: 20px;
-  font-weight: 800;
-  color: var(--gold-bright);
+  font-size: 18.5px;
+  font-weight: 900;
+  color: #ffffff;
+  letter-spacing: 0.2px;
+  text-shadow: 0 2px 4px #000, 0 0 8px rgba(0, 0, 0, 0.9);
 }
 
 /* Bảng TẤM LÒNG THÀNH bên phải đáy */
 .hud-right-leaderboard {
-  background: rgba(22, 7, 4, 0.94);
-  border: 1.5px solid rgba(244, 193, 80, 0.65);
+  background: rgba(22, 7, 4, 0.96);
+  border: 2px solid rgba(244, 193, 80, 0.7);
   border-radius: 16px;
-  padding: 12px 16px;
+  padding: 10px 14px;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
 }
 
 .hud-lb-header {
   text-align: center;
   font-family: 'Noto Serif', serif;
-  font-size: 19px;
+  font-size: 21px;
   font-weight: 900;
-  color: var(--gold-bright);
-  letter-spacing: 1.5px;
+  color: #ffe082;
+  letter-spacing: 2px;
   padding-bottom: 6px;
   margin-bottom: 6px;
-  border-bottom: 1px solid rgba(244, 193, 80, 0.3);
+  border-bottom: 1.5px solid rgba(244, 193, 80, 0.4);
 }
 
 .hud-lb-list {
@@ -852,17 +909,17 @@ body.obs-mode .stage-wrapper {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 16px;
+  font-size: 18px;
 }
 .leader-rank {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  background: rgba(244, 193, 80, 0.25);
-  border: 1px solid var(--gold-main);
+  background: rgba(244, 193, 80, 0.3);
+  border: 1.5px solid var(--gold-main);
   color: var(--gold-bright);
-  font-size: 13px;
-  font-weight: 800;
+  font-size: 15px;
+  font-weight: 900;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -870,15 +927,15 @@ body.obs-mode .stage-wrapper {
 }
 .leader-name {
   flex: 1;
-  font-weight: 700;
+  font-weight: 800;
   color: var(--ivory);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .leader-merit {
-  font-weight: 800;
-  color: var(--gold-bright);
+  font-weight: 900;
+  color: #ffe082;
   margin-left: 8px;
 }
 
@@ -888,14 +945,14 @@ body.obs-mode .stage-wrapper {
 .fortune-modal-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(10, 2, 1, 0.82);
+  background: rgba(10, 2, 1, 0.85);
   z-index: 50;
   display: flex;
   align-items: center;
   justify-content: center;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.18s ease;
+  transition: opacity 0.22s ease;
 }
 .fortune-modal-overlay.visible {
   opacity: 1;
@@ -903,57 +960,59 @@ body.obs-mode .stage-wrapper {
 }
 
 .fortune-scroll-card {
-  width: 780px;
-  background: linear-gradient(180deg, #fff5dc 0%, #f5deb3 100%);
+  width: 860px;
+  max-width: 92%;
+  background: linear-gradient(180deg, #fff8e7 0%, #fae8c6 100%);
   color: #3b0d09;
   border: 6px solid #8c1812;
-  outline: 3px solid var(--gold-main);
-  border-radius: 24px;
-  padding: 34px 42px;
+  outline: 3.5px solid var(--gold-main);
+  border-radius: 26px;
+  padding: 38px 46px;
   text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.95), 0 0 35px rgba(255, 215, 0, 0.35);
 }
 .fortune-badge {
   display: inline-block;
   background: #8c1812;
   color: var(--gold-bright);
-  font-weight: 800;
-  font-size: 22px;
-  padding: 6px 24px;
+  font-weight: 900;
+  font-size: 26px;
+  padding: 8px 32px;
   border-radius: 999px;
-  letter-spacing: 2px;
-  margin-bottom: 12px;
+  letter-spacing: 2.5px;
+  margin-bottom: 14px;
 }
 .fortune-heading {
   font-family: 'Noto Serif', serif;
-  font-size: 35px;
+  font-size: 42px;
   font-weight: 900;
   color: #6b0f0a;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .fortune-devotee {
-  font-size: 22px;
-  font-weight: 700;
+  font-size: 28px;
+  font-weight: 900;
   color: #8c2d19;
   margin-bottom: 18px;
 }
 .fortune-poem {
   font-family: 'Noto Serif', serif;
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.55;
-  color: #2b0705;
-  background: rgba(140, 24, 18, 0.08);
-  border-top: 2px dashed rgba(140, 24, 18, 0.35);
-  border-bottom: 2px dashed rgba(140, 24, 18, 0.35);
-  padding: 18px 20px;
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1.6;
+  color: #200402;
+  background: rgba(140, 24, 18, 0.09);
+  border-top: 2.5px dashed rgba(140, 24, 18, 0.4);
+  border-bottom: 2.5px dashed rgba(140, 24, 18, 0.4);
+  padding: 22px 24px;
   white-space: pre-line;
-  margin-bottom: 18px;
+  margin-bottom: 20px;
 }
 .fortune-meaning {
-  font-size: 21px;
-  line-height: 1.45;
+  font-size: 27px;
+  line-height: 1.5;
   color: #3d120d;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .volume-control-row {
@@ -1119,4 +1178,591 @@ body.obs-mode .stage-wrapper {
   background: rgba(255, 255, 255, 0.04);
   border-left: 3px solid var(--gold-main);
   color: #f3e5cf;
+}
+
+/* ==========================================================================
+   11. HỆ THỐNG TRỤ TRÌ CHÙA & THẺ THÔNG BÁO HOÀNG KIM (ABBOT MONK & SPEECH BUBBLE)
+   ========================================================================== */
+.abbot-monk-node {
+  position: absolute;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  transform-origin: bottom center;
+  will-change: transform, left, top;
+  z-index: 10;
+}
+
+.monk-sprite {
+  display: block;
+  width: 128px;
+  height: 240px;
+  object-fit: contain;
+  object-position: bottom center;
+  transform-origin: bottom center;
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.75));
+}
+
+/* Thẻ Thông Báo Hoàng Kim Độc Lập Nổi Trên Đầu Thầy Trụ Trì (Neo đáy ở y=960, trên đỉnh đầu Thầy y=983, không bao giờ che Thầy) */
+.abbot-standalone-card {
+  position: absolute;
+  left: 540px;
+  top: 840px;
+  transform: translate3d(-50%, calc(-100% - 14px), 0) scale(0.92);
+  opacity: 0;
+  pointer-events: none;
+  min-width: 440px;
+  max-width: 720px;
+  width: max-content;
+  z-index: 55;
+  transition: opacity 0.45s cubic-bezier(0.16, 1, 0.3, 1), transform 0.45s cubic-bezier(0.16, 1, 0.3, 1), left 0.4s ease;
+}
+
+.abbot-standalone-card::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 14px 12px 0 12px;
+  border-style: solid;
+  border-color: #f4c150 transparent transparent transparent;
+  filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.7));
+}
+
+.abbot-standalone-card.visible {
+  opacity: 1;
+  transform: translate3d(-50%, -100%, 0) scale(1);
+  pointer-events: auto;
+}
+
+.abbot-card-inner {
+  background: radial-gradient(circle at 50% 0%, #4a0f0b 0%, #1f0403 85%);
+  border: 2px solid #f4c150;
+  border-radius: 20px;
+  padding: 18px 26px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.94), 0 0 32px rgba(244, 193, 80, 0.45);
+  position: relative;
+}
+
+.abbot-card-inner::before {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border: 1px dashed rgba(244, 193, 80, 0.4);
+  border-radius: 15px;
+  pointer-events: none;
+}
+
+.abbot-card-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.abbot-card-badge {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  color: #ffe694;
+  background: rgba(84, 18, 12, 0.92);
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(244, 193, 80, 0.6);
+}
+
+.abbot-card-title {
+  font-family: 'Noto Serif', serif;
+  font-size: 21px;
+  font-weight: 900;
+  color: #fff9e6;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8), 0 0 10px rgba(255, 224, 130, 0.6);
+  letter-spacing: 0.8px;
+  margin-top: 4px;
+}
+
+.abbot-card-divider {
+  width: 65%;
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent 0%, #f4c150 50%, transparent 100%);
+  margin: 10px auto 12px auto;
+}
+
+.abbot-card-body {
+  font-size: 17px;
+  line-height: 1.6;
+  color: #fff6e8;
+  text-align: center;
+  font-weight: 600;
+  max-height: 260px;
+  overflow-y: auto;
+  word-break: break-word;
+  padding: 4px 6px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+/* ==========================================================================
+   12. HỆ THỐNG PHẬT TỬ DI CHUYỂN ĐỘNG TRONG SÂN LỄ (WORSHIPPER CONTROLLER)
+   ========================================================================== */
+.worshipper-avatar-node {
+  position: absolute;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  will-change: transform, left, top;
+}
+
+.worshipper-avatar-node .devotee-sprite {
+  width: 104px;
+  height: 135px;
+  object-fit: contain;
+  object-position: bottom center;
+  transform-origin: bottom center;
+}
+
+.worshipper-wish-mini-bubble {
+  max-width: 360px;
+  padding: 6px 16px;
+  margin-bottom: 4px;
+  border-radius: 14px;
+  background: rgba(18, 5, 4, 0.96);
+  border: 2px solid #ffd54f;
+  color: #fff9c4;
+  font-size: 20px;
+  font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.95);
+}
+
+.worshipper-wish-mini-bubble.fade {
+  animation: wishBubbleFade 6s ease forwards;
+}
+
+@keyframes wishBubbleFade {
+  0% { opacity: 0; transform: translateY(6px); }
+  10% { opacity: 1; transform: translateY(0); }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+
+
+/* ============================================================================
+   15. TOP GUIDE BUTTON & CONTINUOUS TEMPLE SCROLL MARQUEE
+   ============================================================================ */
+.top-guide-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(82, 38, 12, 0.95), rgba(138, 74, 18, 0.92));
+  border: 1.5px solid rgba(255, 215, 0, 0.75);
+  color: #fff4bd;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 240, 160, 0.4);
+  transition: all 0.22s ease;
+  user-select: none;
+}
+
+.top-guide-btn:hover {
+  background: linear-gradient(135deg, rgba(110, 52, 16, 0.98), rgba(175, 96, 24, 0.96));
+  border-color: #ffe680;
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(255, 200, 50, 0.35);
+}
+
+.temple-scroll-marquee {
+  position: absolute;
+  top: 70px;
+  left: 20px;
+  right: 20px;
+  height: 48px;
+  z-index: 25;
+  background: linear-gradient(90deg, rgba(18, 7, 4, 0.96), rgba(46, 18, 8, 0.94), rgba(18, 7, 4, 0.96));
+  border: 1.5px solid rgba(244, 193, 80, 0.7);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.75), inset 0 0 14px rgba(255, 180, 50, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+
+.temple-scroll-marquee:hover {
+  border-color: rgba(255, 230, 100, 0.9);
+  box-shadow: 0 6px 24px rgba(255, 190, 40, 0.38);
+}
+
+.marquee-badge {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px;
+  height: 100%;
+  background: linear-gradient(135deg, #c4912e, #7a4a10);
+  color: #ffffff;
+  font-size: 15.5px;
+  font-weight: 900;
+  letter-spacing: 0.8px;
+  border-radius: 999px 0 0 999px;
+  box-shadow: 3px 0 10px rgba(0, 0, 0, 0.45);
+}
+
+.marquee-badge-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #73f78a;
+  box-shadow: 0 0 8px #73f78a;
+  animation: badgeDotBreathe 1.8s infinite alternate;
+}
+
+@keyframes badgeDotBreathe {
+  0% { transform: scale(0.85); opacity: 0.7; }
+  100% { transform: scale(1.25); opacity: 1; }
+}
+
+.marquee-track-container {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.marquee-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: marqueeScroll 45s linear infinite;
+  will-change: transform;
+}
+
+.temple-scroll-marquee:hover .marquee-track {
+  animation-play-state: paused;
+}
+
+@keyframes marqueeScroll {
+  0% { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(-50%, 0, 0); }
+}
+
+.marquee-item {
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff8d6;
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.marquee-item strong {
+  color: #ffffff;
+  background: rgba(255, 215, 0, 0.22);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 900;
+}
+
+.marquee-item em {
+  color: #ffd54f;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.marquee-item .highlight-gift {
+  color: #ff8a80;
+  font-weight: 900;
+  text-shadow: 0 0 8px rgba(255, 118, 117, 0.6);
+}
+
+.marquee-sep {
+  color: rgba(255, 215, 0, 0.6);
+  font-size: 18px;
+}
+
+/* ============================================================================
+   16. TEMPLE GUIDE & LEGAL DISCLAIMER MODAL
+   ============================================================================ */
+.temple-guide-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  background: rgba(10, 3, 2, 0.84);
+  backdrop-filter: blur(12px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+  animation: guideFadeIn 0.28s ease-out;
+}
+
+.temple-guide-modal-overlay.active {
+  display: flex;
+}
+
+@keyframes guideFadeIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.temple-guide-card {
+  position: relative;
+  width: 100%;
+  max-width: 980px;
+  max-height: 90vh;
+  background: linear-gradient(180deg, #1f0d07 0%, #150804 100%);
+  border: 2px solid rgba(255, 215, 0, 0.65);
+  border-radius: 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.9), 0 0 40px rgba(212, 175, 55, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.guide-close-btn {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1.5px solid rgba(255, 215, 0, 0.4);
+  color: #fff2b8;
+  font-size: 20px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  z-index: 2;
+}
+
+.guide-close-btn:hover {
+  background: rgba(220, 50, 40, 0.85);
+  border-color: #ff7675;
+  color: #fff;
+  transform: rotate(90deg);
+}
+
+.guide-header {
+  padding: 32px 36px 18px;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 215, 0, 0.25);
+  background: linear-gradient(180deg, rgba(80, 32, 12, 0.4) 0%, transparent 100%);
+}
+
+.guide-lotus-icon {
+  font-size: 38px;
+  margin-bottom: 6px;
+  filter: drop-shadow(0 0 12px rgba(255, 190, 50, 0.6));
+}
+
+.guide-title {
+  font-family: 'Cinzel', serif;
+  font-size: 32px;
+  font-weight: 900;
+  color: #ffd700;
+  letter-spacing: 2px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8), 0 0 24px rgba(255, 215, 0, 0.4);
+}
+
+.guide-subtitle {
+  font-size: 15px;
+  color: #e6c88b;
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.guide-body {
+  padding: 24px 36px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: #f5eedc;
+}
+
+.guide-section {
+  border-radius: 18px;
+  padding: 20px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.guide-sec-title {
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.legal-section {
+  background: rgba(14, 20, 32, 0.65);
+  border-color: rgba(90, 140, 220, 0.35);
+}
+.legal-section .guide-sec-title {
+  color: #89b4fa;
+}
+.legal-section .guide-sec-text p {
+  margin-bottom: 8px;
+}
+.legal-section .guide-sec-text p:last-child {
+  margin-bottom: 0;
+}
+
+.free-section {
+  background: rgba(18, 30, 20, 0.55);
+  border-color: rgba(100, 200, 120, 0.3);
+}
+.free-section .guide-sec-title {
+  color: #a6e3a1;
+}
+
+.guide-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.guide-mini-card {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.guide-mini-card .g-icon {
+  font-size: 26px;
+}
+.guide-mini-card strong {
+  color: #ffe066;
+  font-size: 14px;
+}
+.guide-mini-card span {
+  font-size: 13px;
+  color: #d1c7b7;
+  line-height: 1.45;
+}
+
+.vip-section {
+  background: linear-gradient(135deg, rgba(60, 26, 8, 0.7) 0%, rgba(35, 12, 4, 0.7) 100%);
+  border-color: rgba(255, 215, 0, 0.45);
+  box-shadow: inset 0 0 20px rgba(255, 180, 50, 0.08);
+}
+.vip-section .guide-sec-title {
+  color: #ffd700;
+  text-shadow: 0 0 12px rgba(255, 215, 0, 0.4);
+}
+
+.vip-benefit-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vip-item {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1.2px solid rgba(255, 215, 0, 0.25);
+  border-radius: 14px;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.vip-item:hover {
+  border-color: rgba(255, 215, 0, 0.6);
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.vip-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+.vip-badge.gold {
+  background: linear-gradient(135deg, #e67e22, #b8860b);
+  color: #fff;
+}
+.vip-badge.diamond {
+  background: linear-gradient(135deg, #9b59b6, #e74c3c);
+  color: #fff;
+}
+.vip-badge.platinum {
+  background: linear-gradient(135deg, #f1c40f, #d35400);
+  color: #000;
+}
+
+.vip-desc {
+  font-size: 13.5px;
+  color: #f3e6d1;
+  line-height: 1.5;
+}
+.vip-desc strong {
+  color: #ffe680;
+}
+.vip-desc em {
+  color: #ff9f43;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.guide-footer {
+  padding: 18px 36px 26px;
+  border-top: 1px solid rgba(255, 215, 0, 0.25);
+  display: flex;
+  justify-content: center;
+  background: rgba(12, 4, 2, 0.6);
+}
+
+.guide-action-btn {
+  padding: 13px 48px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #c9933b, #7d4e13);
+  border: 2px solid #ffd700;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 6px 22px rgba(200, 140, 20, 0.4);
+  transition: all 0.2s;
+}
+
+.guide-action-btn:hover {
+  background: linear-gradient(135deg, #deb04f, #945f1b);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 28px rgba(255, 200, 40, 0.55);
 }

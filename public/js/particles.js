@@ -35,18 +35,20 @@ class TempleParticleEngine {
   }
 
   buildOffscreenSprites() {
-    // 1. Pre-render Smoke Puff Sprite (64x64)
+    // 1. Pre-render Soft Volumetric Smoke Sprite (96x96 Gaussian Feathered)
     this.smokeSprite = document.createElement('canvas');
-    this.smokeSprite.width = 64;
-    this.smokeSprite.height = 64;
+    this.smokeSprite.width = 96;
+    this.smokeSprite.height = 96;
     const sctx = this.smokeSprite.getContext('2d');
-    const sgrad = sctx.createRadialGradient(32, 32, 2, 32, 32, 30);
-    sgrad.addColorStop(0, 'rgba(255, 246, 218, 0.85)');
-    sgrad.addColorStop(0.5, 'rgba(238, 222, 185, 0.4)');
-    sgrad.addColorStop(1, 'rgba(220, 200, 160, 0)');
+    const sgrad = sctx.createRadialGradient(48, 48, 4, 48, 48, 46);
+    sgrad.addColorStop(0, 'rgba(255, 252, 244, 0.92)');
+    sgrad.addColorStop(0.25, 'rgba(248, 242, 228, 0.65)');
+    sgrad.addColorStop(0.6, 'rgba(235, 225, 205, 0.32)');
+    sgrad.addColorStop(0.85, 'rgba(220, 210, 190, 0.12)');
+    sgrad.addColorStop(1, 'rgba(210, 200, 180, 0)');
     sctx.fillStyle = sgrad;
     sctx.beginPath();
-    sctx.arc(32, 32, 30, 0, Math.PI * 2);
+    sctx.arc(48, 48, 46, 0, Math.PI * 2);
     sctx.fill();
 
     // 2. Pre-render Gold Spark Sprite (16x16)
@@ -121,37 +123,67 @@ class TempleParticleEngine {
   }
 
   spawnSmokeFromTips() {
-    if (!this.incenseTips.length || this.smokeParticles.length >= 22) return;
-    if (Math.random() > 0.45 * this.smokeDensity) return;
+    // Giữ số lượng hạt khói thanh thoát (tối đa 28 hạt), không làm mờ đài sen
+    if (!this.incenseTips.length || this.smokeParticles.length >= 28) return;
+    if (Math.random() > 0.65 * this.smokeDensity) return;
 
-    const tip = this.incenseTips[Math.floor(Math.random() * this.incenseTips.length)];
-    this.smokeParticles.push({
-      x: tip.x + (Math.random() - 0.5) * 6,
-      y: tip.y,
-      vx: (Math.random() - 0.5) * 0.25,
-      vy: -(2.4 + Math.random() * 1.0),
-      radius: 8 + Math.random() * 5,
-      maxRadius: 28 + Math.random() * 16,
-      alpha: 0.24 + Math.random() * 0.1,
-      age: 0,
-      maxAge: 68 + Math.random() * 25,
-      seed: Math.random() * 50
-    });
+    // Sinh 1 hạt khói thanh tao từ đầu nén nhang
+    const count = 1;
+    for (let c = 0; c < count; c++) {
+      const tip = this.incenseTips[Math.floor(Math.random() * this.incenseTips.length)];
+      this.smokeParticles.push({
+        x: tip.x + (Math.random() - 0.5) * 2,
+        y: tip.y,
+        vx: (Math.random() - 0.5) * 0.25,
+        vy: -(1.6 + Math.random() * 0.9),
+        radius: 6 + Math.random() * 4,
+        maxRadius: 20 + Math.random() * 8,
+        alpha: 0.30 + Math.random() * 0.16,
+        age: 0,
+        maxAge: 65 + Math.random() * 20,
+        seed: Math.random() * 60,
+        swirl: (Math.random() - 0.5) * 0.8
+      });
+    }
   }
 
-  spawnIncenseBurst(x = 540, y = 890) {
-    for (let i = 0; i < 18; i++) {
-      const angle = -Math.PI / 2 + (Math.random() - 0.5) * 1.1;
-      const speed = 2.5 + Math.random() * 5.0;
+  // Khi dâng hương: Làn khói trầm hương thanh thoát, mềm mại (không che khuất đài sen đẹp)
+  spawnIncenseBurst(x = 540, y = 840) {
+    // 1. Tia lửa tâm thành vàng rực
+    for (let i = 0; i < 14; i++) {
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * 1.2;
+      const speed = 2.0 + Math.random() * 4.0;
       this.burstParticles.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        r: 2.5 + Math.random() * 3.0,
-        alpha: 1,
+        r: 2.0 + Math.random() * 2.2,
+        alpha: 0.9,
         decay: 0.035 + Math.random() * 0.02,
         color: i % 2 === 0 ? '#ffdf85' : '#ff9e44'
+      });
+    }
+
+    // 2. KHÓI TRẦM THANH NHÃ: 12-14 làn khói mềm mại, tản dần trước khi tới đài sen
+    const burstSmokeCount = Math.min(14, Math.round(11 * this.smokeDensity));
+    for (let i = 0; i < burstSmokeCount; i++) {
+      const delay = Math.random() * 12;
+      const tip = this.incenseTips.length
+        ? this.incenseTips[Math.floor(Math.random() * this.incenseTips.length)]
+        : { x, y };
+      this.smokeParticles.push({
+        x: tip.x + (Math.random() - 0.5) * 10,
+        y: tip.y + (Math.random() - 0.5) * 4,
+        vx: (Math.random() - 0.5) * 0.5,
+        vy: -(1.8 + Math.random() * 1.2),
+        radius: 8 + Math.random() * 5,
+        maxRadius: 22 + Math.random() * 10,
+        alpha: 0.35 + Math.random() * 0.15,
+        age: -Math.round(delay),
+        maxAge: 70 + Math.random() * 25,
+        seed: Math.random() * 100,
+        swirl: (Math.random() - 0.5) * 1.0
       });
     }
   }
@@ -225,23 +257,30 @@ class TempleParticleEngine {
       ctx.drawImage(this.sparkSprite, sp.x - sp.size * 0.5, sp.y - sp.size * 0.5, sp.size, sp.size);
     }
 
-    // 2. Khói tâm hương (dùng drawImage từ smokeSprite đã pre-render)
+    // 2. Khói tâm hương bay nghi ngút (dùng drawImage từ smokeSprite 96x96 đã pre-render)
     this.spawnSmokeFromTips();
     for (let i = this.smokeParticles.length - 1; i >= 0; i--) {
       const p = this.smokeParticles[i];
       p.age += 1;
-      if (p.age >= p.maxAge || p.y < 495) {
+      if (p.age < 0) continue; // Đang trong độ trễ xuất hiện từng đợt
+      // Khói tan hoàn toàn trước y = 775px để KHÔNG BAO GIỜ che khuất Đài Sen Phật ngự
+      if (p.age >= p.maxAge || p.y < 775) {
         this.smokeParticles.splice(i, 1);
         continue;
       }
       const progress = p.age / p.maxAge;
-      const curl = Math.sin(this.time * 1.5 + p.seed + p.y * 0.014) * 0.55;
-      p.x += p.vx + curl * (0.3 + progress * 0.5);
+      const curl = Math.sin(this.time * 1.6 + p.seed + p.y * 0.012) * (0.35 + (p.swirl || 0.4) * progress);
+      p.x += p.vx + curl * (0.25 + progress * 0.4);
       p.y += p.vy;
 
-      const r = p.radius + (p.maxRadius - p.radius) * progress;
-      const fade = Math.sin(progress * Math.PI) * p.alpha * (1 - progress * 0.6);
-      ctx.globalAlpha = Math.max(0, fade);
+      const r = p.radius + (p.maxRadius - p.radius) * Math.sqrt(progress);
+      // Fade in nhẹ từ đầu nhang và tan biến dần khi bay lên gần Đài Sen
+      const fadeIn = Math.min(1, progress * 4.0);
+      const fadeOut = Math.max(0, Math.pow(1 - progress, 0.9));
+      // Độ trong suốt giảm dần về 0 khi tiến sát trần khói y = 775
+      const ceilingFade = Math.max(0, Math.min(1, (p.y - 775) / 95));
+      const fade = fadeIn * fadeOut * p.alpha * ceilingFade;
+      ctx.globalAlpha = Math.max(0, Math.min(1, fade));
       ctx.drawImage(this.smokeSprite, p.x - r, p.y - r, r * 2, r * 2);
     }
 

@@ -26,6 +26,8 @@
       padding: 28px;
     }
     .container {
+      min-width: 0;
+      width: 100%;
       max-width: 1280px;
       margin: 0 auto;
       display: flex;
@@ -77,10 +79,12 @@
     }
     .grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 20px;
     }
     .card {
+      min-width: 0;
+      overflow: hidden;
       background: var(--card);
       border: 1.5px solid var(--border);
       border-radius: 18px;
@@ -122,7 +126,11 @@
       font-size: 12.5px;
       color: #9ef0c0;
       overflow-x: auto;
-      max-height: 280px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 380px;
+      max-width: 100%;
     }
   </style>
 </head>
@@ -130,7 +138,7 @@
   <div class="container">
     <header class="top-bar">
       <div>
-        <div class="top-title">🪷 BẢNG ĐIỀU KHIỂN CHÙA ONLINE TIKTOK LIVE RPC (BUN.JS + ZEROTTS MAI CHI)</div>
+        <div class="top-title">🪷 BẢNG ĐIỀU KHIỂN CHÙA ONLINE TIKTOK LIVE RPC (BUN.JS + ZEROTTS NAM TRẦM ẤM)</div>
         <div class="top-sub" id="statusBanner">Đang tải trạng thái hệ thống...</div>
       </div>
       <div class="top-links">
@@ -141,17 +149,45 @@
 
     <div class="grid">
       <section class="card">
-        <h2>📡 1. Kết Nối Phòng TikTok Live & Giọng Đọc ZeroTTS (Mai Chi)</h2>
+        <h2>📡 1. Kết Nối Phòng TikTok Live & Giọng Đọc ZeroTTS (Nam Trầm Ấm)</h2>
         <div class="row">
-          <input type="text" id="ttUser" placeholder="Nhập @username TikTok đang phát Live..." />
+          <input type="text" id="ttUser" value="anxuaan" placeholder="Nhập @username TikTok đang phát Live..." />
           <button class="btn gold" id="btnConn">Kết Nối Live</button>
           <button class="btn" id="btnDisc">Ngắt</button>
         </div>
+        <div style="background: rgba(244, 193, 80, 0.08); border: 1px dashed var(--gold); border-radius: 10px; padding: 12px; margin: 6px 0;">
+          <div style="font-size: 13px; font-weight: 700; color: var(--gold); margin-bottom: 6px;">🔑 EulerStream Sign API Key (Chống lỗi Rate Limit):</div>
+          <div class="row">
+            <input type="text" id="signApiKey" placeholder="Dán API Key EulerStream vào đây (VD: es_...)" autocomplete="off" />
+            <button class="btn gold" id="btnSaveSignKey" style="white-space: nowrap;">💾 Lưu Key</button>
+          </div>
+          <div style="font-size: 12px; color: var(--muted); margin-top: 4px;">* Không phải RPC token. API Key lấy từ tài khoản eulerstream.com.</div>
+        </div>
+        <div class="row">
+          <input type="password" id="ttSessionId" placeholder="TikTok sessionid (tuỳ chọn — lấy từ F12 cookies)" autocomplete="off" />
+        </div>
+        <div class="row">
+          <select id="adminVoiceSelect" aria-label="Chọn giọng đọc">
+            <option value="giahuy">Gia Huy — nam trầm ấm</option>
+          </select>
+          <button class="btn" id="btnPreviewVoice">🔊 Nghe thử</button>
+        </div>
         <div class="row">
           <input type="text" id="ttsDirectText" value="Nam mô A Di Đà Phật. Chùa Linh Ứng Online xin kính chào quý thí chủ thập phương." />
-          <button class="btn gold" id="btnSpeakMaiChi">🎙️ Đọc thử Giọng Mai Chi</button>
+          <button class="btn gold" id="btnSpeakVoice">🎙️ Đọc thử giọng đã chọn</button>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin: 6px 0 2px 0;">
+          <label style="display:inline-flex; align-items:center; gap:8px; font-size:13px; color:var(--gold-light); cursor:pointer;">
+            <input type="checkbox" id="chkAdminAutoAudio" checked style="width:16px; height:16px; accent-color:var(--gold);" />
+            🔊 Tự động phát âm thanh ZeroTTS trên trang Admin khi gửi lệnh
+          </label>
+          <span id="ttsAudioStatus" style="font-size:12px; color:var(--muted);">Sẵn sàng</span>
         </div>
         <audio id="adminAudioPreview" controls style="width: 100%; height: 38px;"></audio>
+        <div class="row">
+          <input type="password" id="rpcToken" placeholder="RPC token — chỉ cần khi server đặt biến RPC_TOKEN" autocomplete="off" />
+          <button class="btn" id="btnSaveToken">Lưu Token</button>
+        </div>
       </section>
 
       <section class="card">
@@ -163,7 +199,7 @@
         <div class="action-grid">
           <button class="btn gold" onclick="sendRpc('temple.burnIncense', { count: 3 })">🔥 Thắp 3 Nén Hương</button>
           <button class="btn" onclick="sendRpc('temple.sendPrayer', {})">🏮 Thả Đèn Hoa Đăng</button>
-          <button class="btn" onclick="sendRpc('temple.strikeWoodenFish', { count: 9 })">🪵 Gõ Mõ 9 Nhịp</button>
+          <button class="btn" onclick="sendRpc('temple.strikeWoodenFish', { count: 9 })">🛎️ Thỉnh Khánh 9 Nhịp</button>
           <button class="btn" onclick="sendRpc('temple.ringBell', { count: 1, readTts: true })">🔔 Thỉnh Đại Hồng Chung</button>
           <button class="btn" onclick="sendRpc('temple.drawFortune', {})">🎋 Xin Xăm / Gieo Quẻ</button>
           <button class="btn" onclick="sendRpc('temple.offerGift', { giftType: 'fruit', coins: 30, giftName: 'Mâm Ngũ Quả Cát Tường' })">🍑 Dâng Mâm Ngũ Quả</button>
@@ -184,13 +220,66 @@
       </section>
 
       <section class="card">
-        <h2>🔌 4. Nhật Ký Phản Hồi JSON-RPC 2.0 (`/rpc`)</h2>
+        <h2>🪷 4. Gửi Lời Khai Thị / Thông Báo Trụ Trì (`temple.adminNotice`)</h2>
+        <div class="row">
+          <input type="text" id="adminNoticeTitle" value="LỜI CHÚC TỪ THẦY TRỤ TRÌ" placeholder="Tiêu đề thông báo..." />
+          <select id="adminNoticePriority" style="max-width: 150px;">
+            <option value="normal">Bình thường</option>
+            <option value="high">Ưu tiên cao</option>
+            <option value="urgent">Khẩn cấp</option>
+          </select>
+        </div>
+        <textarea id="adminNoticeMsg" rows="3" placeholder="Nhập lời dạy của Thầy hoặc thông báo đến Phật tử thập phương...">Nam Mô A Di Đà Phật. Kính chúc quý Phật tử cùng gia quyến luôn bình an, mạnh khỏe, sở cầu như ý, sở nguyện tòng tâm.</textarea>
+        <button class="btn gold" onclick="sendAdminNotice()">📢 Trụ Trì Xuất Hiện & Đọc Thông Báo</button>
+      </section>
+
+      <section class="card">
+        <h2>🔌 5. Nhật Ký Phản Hồi JSON-RPC 2.0 (`/rpc`)</h2>
         <pre id="rpcOutput">{ "status": "Sẵn sàng nhận lệnh JSON-RPC 2.0" }</pre>
       </section>
     </div>
   </div>
 
   <script>
+    // RPC token tuỳ chọn — khớp biến môi trường RPC_TOKEN của server (nếu có)
+    const urlParams = new URLSearchParams(window.location.search);
+    let rpcToken = urlParams.get('token') || localStorage.getItem('temple_rpc_token') || '';
+    if (urlParams.get('token')) {
+      try { localStorage.setItem('temple_rpc_token', rpcToken); } catch (_) {}
+    }
+    function rpcHeaders(extra = {}) {
+      return rpcToken ? { ...extra, 'x-rpc-token': rpcToken } : { ...extra };
+    }
+
+    async function playAdminTts(text, voice) {
+      const clean = String(text || '').trim();
+      if (!clean) return;
+      const statusEl = document.getElementById('ttsAudioStatus');
+      const player = document.getElementById('adminAudioPreview');
+      if (statusEl) statusEl.textContent = '⏳ Đang tạo giọng đọc...';
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: rpcHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ text: clean, voice: voice || selectedVoice(), priority: 0 })
+        });
+        const data = await res.json();
+        if (data && data.url) {
+          if (player) {
+            player.src = data.url;
+            player.play().catch((err) => {
+              console.warn('[Admin Audio Autoplay]', err.message);
+            });
+          }
+          if (statusEl) statusEl.textContent = `✅ Đã phát: ${(data.durationSec || 2)}s`;
+        } else {
+          if (statusEl) statusEl.textContent = `⚠️ ZeroTTS: ${data?.error || 'Lỗi tạo giọng'}`;
+        }
+      } catch (e) {
+        if (statusEl) statusEl.textContent = `❌ Lỗi mạng: ${e.message}`;
+      }
+    }
+
     async function sendRpc(method, extraParams = {}) {
       const user = document.getElementById('rpcUser').value.trim() || 'Thí Chủ';
       const wish = document.getElementById('rpcWish').value.trim();
@@ -202,41 +291,151 @@
       };
       const res = await fetch('/rpc', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: rpcHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body)
       });
       const data = await res.json();
       document.getElementById('rpcOutput').textContent = JSON.stringify(data, null, 2);
       refreshStatus();
+
+      // Tự động phát âm thanh ZeroTTS ngay trên trang Admin khi gửi lệnh
+      const chk = document.getElementById('chkAdminAutoAudio');
+      if (!chk || chk.checked) {
+        const evt = data?.result?.event;
+        const ttsText = evt?.ttsText || data?.result?.ttsText;
+        const ttsVoice = evt?.ttsVoice || data?.result?.voice || selectedVoice();
+        if (ttsText) {
+          playAdminTts(ttsText, ttsVoice);
+        }
+      }
+
       return data;
+    }
+
+    async function sendAdminNotice() {
+      const title = document.getElementById('adminNoticeTitle').value.trim() || 'THÔNG BÁO TỪ CHÙA LINH ỨNG';
+      const message = document.getElementById('adminNoticeMsg').value.trim();
+      const priority = document.getElementById('adminNoticePriority').value;
+      if (!message) {
+        alert('Vui lòng nhập nội dung thông báo');
+        return;
+      }
+      return sendRpc('temple.adminNotice', { title, message, priority, readTts: true });
+    }
+
+    const voiceSelect = document.getElementById('adminVoiceSelect');
+    const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    function selectedVoice() {
+      return voiceSelect?.value || 'giahuy';
+    }
+
+    function voiceLabel(name, details) {
+      const found = (details || []).find((v) => v.name === name);
+      return found?.displayName || name || 'Gia Huy';
+    }
+
+    async function loadVoices() {
+      try {
+        const res = await fetch('/api/voices');
+        const data = await res.json();
+        const list = Array.isArray(data.voices) && data.voices.length
+          ? data.voices
+          : (Array.isArray(data.maleVoices) ? data.maleVoices.map((n) => ({ name: n, displayName: n, male: true })) : []);
+        if (!list.length) return;
+        const current = voiceSelect.value || data.default;
+        voiceSelect.innerHTML = list
+          .map((v) => `<option value="${escapeHtml(v.name)}">${escapeHtml(v.displayName || v.name)}${v.male ? ' ♂' : ''}</option>`)
+          .join('');
+        voiceSelect.value = list.some((v) => v.name === current) ? current : (data.default || list[0].name);
+      } catch (_) {}
+    }
+
+    async function synthesizePreview(broadcast) {
+      const text = document.getElementById('ttsDirectText').value.trim();
+      if (!text) return;
+      const data = await sendRpc('temple.speak', { text, voice: selectedVoice(), broadcast, priority: 0 });
+      const url = data?.result?.url;
+      if (url) {
+        const player = document.getElementById('adminAudioPreview');
+        player.src = url;
+        player.play().catch(() => {});
+      }
+    }
+
+    const ttSessionInput = document.getElementById('ttSessionId');
+    if (ttSessionInput) {
+      ttSessionInput.value = localStorage.getItem('temple_tiktok_sessionid') || '';
+    }
+
+    const signApiKeyInput = document.getElementById('signApiKey');
+    if (signApiKeyInput) {
+      signApiKeyInput.value = localStorage.getItem('temple_sign_api_key') || '';
     }
 
     document.getElementById('btnConn').onclick = () => {
       const username = document.getElementById('ttUser').value.trim();
-      sendRpc('live.connect', { username });
+      const sessionId = (ttSessionInput ? ttSessionInput.value.trim() : '');
+      const signApiKey = (signApiKeyInput ? signApiKeyInput.value.trim() : '');
+      if (sessionId) {
+        localStorage.setItem('temple_tiktok_sessionid', sessionId);
+      }
+      if (signApiKey) {
+        localStorage.setItem('temple_sign_api_key', signApiKey);
+      }
+      sendRpc('live.connect', { username, sessionId, signApiKey });
     };
+
+    const btnSaveSignKey = document.getElementById('btnSaveSignKey');
+    if (btnSaveSignKey) {
+      btnSaveSignKey.onclick = () => {
+        const k = (signApiKeyInput?.value || '').trim();
+        if (k) localStorage.setItem('temple_sign_api_key', k);
+        alert('Đã lưu API Key EulerStream vào trình duyệt!');
+      };
+    }
     document.getElementById('btnDisc').onclick = () => sendRpc('live.disconnect', {});
     document.getElementById('btnSendComment').onclick = () => {
       const comment = document.getElementById('simComment').value.trim();
       sendRpc('temple.comment', { comment });
     };
-    document.getElementById('btnSpeakMaiChi').onclick = async () => {
-      const text = document.getElementById('ttsDirectText').value.trim();
-      const data = await sendRpc('temple.speak', { text, voice: 'maichi', broadcast: true });
-      if (data?.result?.url) {
-        const player = document.getElementById('adminAudioPreview');
-        player.src = data.result.url;
-        player.play().catch(() => {});
-      }
+    document.getElementById('btnSpeakVoice').onclick = () => synthesizePreview(true);
+    document.getElementById('btnPreviewVoice').onclick = () => synthesizePreview(false);
+
+    voiceSelect.addEventListener('change', () => {
+      sendRpc('temple.updateSettings', { ttsVoice: selectedVoice() });
+    });
+
+    document.getElementById('btnSaveToken').onclick = () => {
+      rpcToken = document.getElementById('rpcToken').value.trim();
+      if (rpcToken) localStorage.setItem('temple_rpc_token', rpcToken);
+      else localStorage.removeItem('temple_rpc_token');
+      document.getElementById('rpcOutput').textContent = rpcToken
+        ? '{ "status": "Đã lưu RPC token trong trình duyệt" }'
+        : '{ "status": "Đã xoá RPC token" }';
+      refreshStatus();
     };
 
     async function refreshStatus() {
-      const res = await fetch('/api/state');
-      const st = await res.json();
-      document.getElementById('statusBanner').textContent =
-        `Hương đã thắp: ${st.totalIncense} | Tổng Công Đức: ${st.totalMerit} | ZeroTTS: ${st.tts?.status} (Giọng: ${st.tts?.voice})`;
+      try {
+        const res = await fetch('/api/state');
+        if (!res.ok) {
+          document.getElementById('statusBanner').textContent = `Không đọc được trạng thái (HTTP ${res.status}).`;
+          return;
+        }
+        const st = await res.json();
+        const name = voiceLabel(st.tts?.voice, st.tts?.voiceDetails);
+        const viewer = Number(st.tiktok?.viewerCount || 0).toLocaleString('vi-VN');
+        const liveState = st.tiktok?.connected
+          ? `LIVE @${st.tiktok.username} • ${viewer} mắt`
+          : (st.tiktok?.connecting ? 'Đang kết nối TikTok Live...' : 'Chưa kết nối Live');
+        document.getElementById('statusBanner').textContent =
+          `${liveState} | Hương: ${st.totalIncense} | Công Đức: ${Number(st.totalMerit).toLocaleString('vi-VN')} | ZeroTTS: ${st.tts?.status} (${name})`;
+      } catch (_) {}
     }
-    refreshStatus();
+
+    document.getElementById('rpcToken').value = rpcToken;
+    loadVoices().then(refreshStatus);
     setInterval(refreshStatus, 4000);
   </script>
 </body>

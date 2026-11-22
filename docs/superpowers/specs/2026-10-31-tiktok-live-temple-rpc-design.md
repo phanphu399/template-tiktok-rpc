@@ -22,11 +22,12 @@ Xây dựng hệ thống phát trực tiếp tương tác (Interactive Live Stre
    - **JSON-RPC 2.0 Server** qua cả hai kênh:
      - HTTP `POST /rpc` (tích hợp dễ dàng với TikFinity, Streamer.bot, curl, webhook).
      - WebSocket `ws://localhost:3000/ws` (đồng bộ thời gian thực giữa Server, màn hình OBS Live và Admin Panel).
-   - **TikTok Live Connector Bridge**: Sử dụng `tiktok-live-connector` (`WebcastPushConnection`) để lắng nghe trực tiếp các sự kiện `chat`, `like`, `gift`, `social`, `member` từ bất kỳ `@username` TikTok nào đang phát trực tiếp.
+   - **TikTok Live Connector Bridge**: Sử dụng `tiktok-live-connector` (`TikTokLiveConnection`) để lắng nghe trực tiếp các sự kiện `chat`, `like`, `gift`, `social`, `member` từ bất kỳ `@username` TikTok nào đang phát trực tiếp. Tự động kết nối lại với backoff luỹ thừa khi mất mạng hoặc khi streamer chưa mở live; `processInitialData: false` để không phát lại chat cũ.
    - **Merit & Ritual Engine**:
-     - Quản lý hồ sơ thí chủ, cộng điểm Công Đức, lưu trữ bền vững vào `data/merit-state.json`.
-     - Bộ 24 quẻ Linh Xăm chọn lọc (Thượng Thượng Cát, Thượng Cát, Trung Cát, Đại Cát) kèm thơ giải nghĩa và lời khuyên.
-     - Phân tích cú pháp bình luận tiếng Việt không dấu/có dấu để tự động kích hoạt hành động tương ứng.
+     - Quản lý hồ sơ thí chủ, cộng điểm Công Đức, lưu trữ bền vững vào `data/merit-state.json` (giới hạn 800 thí chủ để file không phình vô hạn).
+     - Bộ 10 quẻ Linh Xăm chọn lọc (Thượng Thượng Cát, Đại Cát, Thượng Cát, Trung Cát) kèm thơ giải nghĩa và lời khuyên.
+     - Phân tích cú pháp bình luận tiếng Việt không dấu/có dấu (bỏ dấu + so khớp theo ranh giới từ) để tự động kích hoạt hành động tương ứng.
+   - **Bảo mật tuỳ chọn**: đặt biến môi trường `RPC_TOKEN` để yêu cầu token cho `/rpc`, `/api/tts` và WebSocket (`x-rpc-token`, `Authorization: Bearer`, hoặc `?token=`).
 
 2. **Màn hình Live 9:16 (`public/index.html`, `public/css/live.css`, `public/js/live.js`)**:
    - Khung chuẩn 9:16 (`1080x1920` tự co giãn theo chiều cao màn hình hoặc chế độ toàn màn hình OBS `?obs=1`).
@@ -44,14 +45,14 @@ Xây dựng hệ thống phát trực tiếp tương tác (Interactive Live Stre
      - Đèn Hoa Đăng / Sớ Cầu Nguyện mang tên + avatar + lời khấn trôi từ dưới lên.
    - **Zen Audio Synthesizer & ZeroTTS (`public/js/audio.js` + `tts_worker.py`)**:
      - Web Audio API tổng hợp tiếng Mõ gỗ (Woodblock/Temple block), tiếng Đại Hồng Chung ngân vang (FM Bell Synthesis), tiếng lắc ống xăm, và nhạc nền Thiền định (Tibetan Singing Bowl Drone).
-     - **ZeroTTS (`zeroweight-ai/ZeroTTS`)** chạy qua tiến trình Python thường trú (`tts_worker.py`) sử dụng giọng **`maichi` (Mai Chi)** chuẩn 48kHz tự nhiên để đọc tên thí chủ, lời cầu nguyện, cảm tạ lễ vật và lời giải quẻ xăm (có bộ đệm cache WAV tại `data/tts-cache/` và fallback Web Speech API nếu cần).
-     - Web Speech API (`vi-VN`) đọc tên thí chủ và lời khấn nguyện.
+     - **ZeroTTS (`zeroweight-ai/ZeroTTS`)** chạy qua tiến trình Python thường trú (`tts_worker.py`) sử dụng giọng nam trầm ấm **`giahuy` (Gia Huy)** chuẩn 48kHz để đọc tên thí chủ, lời cầu nguyện, cảm tạ lễ vật và lời giải quẻ xăm (có bộ đệm cache WAV tại `data/tts-cache/`, tự dọn cache và tự khởi động lại worker khi lỗi). Có thể đổi sang `huuduc`, `quangminh`, `tiendat` qua biến `ZEROTTS_VOICE`, `temple.updateSettings` hoặc bộ chọn giọng trên giao diện.
 
-3. **Bảng Điều Khiển RPC & Admin (`public/admin.html`, `public/js/admin.js`)**:
+3. **Bảng Điều Khiển RPC & Admin (`public/admin.html`)**:
    - Kết nối / Ngắt kết nối phòng TikTok Live `@username`.
+   - Bộ chọn giọng đọc nam (Gia Huy / Hữu Đức / Quang Minh / Tiến Đạt), nghe thử và đọc thử trực tiếp.
    - Bàn phím điều khiển nhanh (Quick RPC Trigger) cho từng nghi thức với thông tin thí chủ tuỳ chỉnh hoặc ngẫu nhiên.
-   - Chế độ **Auto-Demo / Giả lập Luồng Đông Người Xem** để kiểm thử hoặc giữ nhiệt khi phòng live vắng.
-   - Nhật ký JSON-RPC 2.0 trực tiếp và quản lý Bảng Vàng Công Đức.
+   - Ô nhập `RPC_TOKEN` (lưu trong localStorage) khi server bật xác thực.
+   - Nhật ký JSON-RPC 2.0 trực tiếp, banner trạng thái Live (số mắt xem) và Bảng Vàng Công Đức.
 
 ---
 
@@ -83,7 +84,7 @@ Mọi yêu cầu tới `POST /rpc` hoặc qua WebSocket tuân thủ chuẩn JSON
 - `temple.sendPrayer`: Thả đèn hoa đăng / sớ cầu nguyện (`user`, `avatar`, `wish`, `readTts`).
 - `temple.drawFortune`: Xin xăm / gieo quẻ (`user`, `avatar`, `topic`).
 - `temple.grandCeremony`: Kích hoạt Đại Lễ Hào Quang Vạn Trượng (`user`, `avatar`, `giftName`, `coins`).
-- `temple.updateSettings`: Cập nhật cấu hình âm thanh, TTS, tốc độ khói, chế độ tự động.
+- `temple.updateSettings`: Cập nhật cấu hình âm thanh, giọng đọc (`ttsVoice`), TTS, tốc độ khói, chế độ tự động.
 - `temple.resetMerit`: Đặt lại dữ liệu thống kê phiên live.
 - `live.connect`: Kết nối tới `@username` TikTok Live.
 - `live.disconnect`: Ngắt kết nối TikTok Live.
